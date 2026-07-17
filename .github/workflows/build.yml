@@ -20,6 +20,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  statuses: write
 
 jobs:
   build:
@@ -28,6 +29,11 @@ jobs:
     steps:
       - name: Check out build repository
         uses: actions/checkout@v4
+
+      - name: Publish pending build status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/build pending
 
       - name: Read pinned configuration
         id: config
@@ -165,3 +171,9 @@ jobs:
             pytorch/build/CMakeFiles/CMakeOutput.log
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Publish final build status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/build "${{ job.status }}"

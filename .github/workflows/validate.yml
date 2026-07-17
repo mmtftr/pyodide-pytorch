@@ -12,12 +12,17 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Publish pending validation status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/validate pending
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -31,3 +36,8 @@ jobs:
         run: |
           bash -n scripts/*.sh
           git diff --check HEAD
+      - name: Publish final validation status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/validate "${{ job.status }}"
