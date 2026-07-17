@@ -68,6 +68,7 @@ jobs:
             "wheel==${WHEEL_VERSION}" \
             "ninja==${NINJA_VERSION}" \
             "cmake==${CMAKE_VERSION}"
+          python scripts/repair_pyodide_build.py
           sudo apt-get update
           sudo apt-get install --yes ccache
           pyodide config get emscripten_version

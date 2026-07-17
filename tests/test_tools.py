@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import config  # noqa: E402
 import postprocess_wheel  # noqa: E402
+import repair_pyodide_build  # noqa: E402
 import validate_wheel  # noqa: E402
 
 
@@ -53,6 +54,15 @@ class ToolTests(unittest.TestCase):
                 wasm_with_imported_memory(shared=False)
             )
         )
+
+    def test_pyodide_toolchain_repair_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "Emscripten.cmake"
+            self.assertTrue(repair_pyodide_build.install_toolchain(destination))
+            self.assertFalse(repair_pyodide_build.install_toolchain(destination))
+            destination.write_text("unexpected", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                repair_pyodide_build.install_toolchain(destination)
         self.assertTrue(
             validate_wheel.wasm_uses_shared_memory(
                 wasm_with_imported_memory(shared=True)

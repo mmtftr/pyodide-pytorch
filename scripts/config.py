@@ -14,6 +14,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "build.toml"
+CONSTRAINTS_PATH = ROOT / "config" / "build-constraints.txt"
 
 ENV_KEYS = {
     "PYTORCH_REPOSITORY": ("pytorch", "repository"),
@@ -91,6 +92,24 @@ def validate(config: dict[str, Any]) -> list[str]:
     ):
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", value):
             errors.append(f"{name} must be an exact numeric version")
+    expected_constraints = [
+        f"cmake=={cmake_version}",
+        f"ninja=={ninja_version}",
+        f"wheel=={wheel_version}",
+    ]
+    try:
+        constraints = [
+            line.strip()
+            for line in CONSTRAINTS_PATH.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    except OSError as exc:
+        errors.append(f"cannot read build constraints: {exc}")
+    else:
+        if constraints != expected_constraints:
+            errors.append(
+                "config/build-constraints.txt must match host_tools exactly"
+            )
     return errors
 
 
