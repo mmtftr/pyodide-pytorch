@@ -92,5 +92,6 @@ if command -v ccache >/dev/null 2>&1; then
 fi
 
 mkdir -p "$output_dir"
+output_dir="$(cd "$output_dir" && pwd)"
 cd "$source_dir"
 pyodide build --exports=whole_archive --outdir "$output_dir"
