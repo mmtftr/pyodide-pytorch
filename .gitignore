@@ -1,0 +1,13 @@
+.DS_Store
+*.log
+*.whl
+*.zip
+__pycache__/
+.pytest_cache/
+.venv/
+build/
+dist/
+node_modules/
+/pytorch/
+/reference/
+wheelhouse/

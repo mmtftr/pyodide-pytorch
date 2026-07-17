@@ -1,0 +1,203 @@
+From e80ab49a53ca68be22aa238471c722f1ca790182 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Thu, 17 Jul 2026 00:00:01 +0300
+Subject: [PATCH 2/4] Run ATen schedulers inline on threadless Wasm
+
+The build defines PYTORCH_WASM_NO_THREADS. Under that explicit configuration,
+report exactly one intra-op and inter-op thread, reject attempts to increase
+the counts, and execute scheduled work synchronously.
+---
+ aten/src/ATen/ParallelNative.cpp           | 26 ++++++++++++++++++++
+ aten/src/ATen/ParallelThreadPoolNative.cpp | 15 +++++++++++
+ c10/core/thread_pool.h                     |  4 +++
+ torch/csrc/autograd/engine.cpp             |  9 ++++++--
+ 4 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/c10/core/thread_pool.h b/c10/core/thread_pool.h
+index d9e2ee1..cc22896 100644
+--- a/c10/core/thread_pool.h
++++ b/c10/core/thread_pool.h
+@@ -39,6 +39,9 @@ class C10_API TaskThreadPoolBase {
+   virtual ~TaskThreadPoolBase() noexcept = default;
+ 
+   static size_t defaultNumThreads() {
++#if defined(PYTORCH_WASM_NO_THREADS)
++    return 1;
++#else
+     auto num_threads = std::thread::hardware_concurrency();
+ #if defined(_M_X64) || defined(__x86_64__)
+     num_threads /= 2;
+@@ -46,5 +49,6 @@ class C10_API TaskThreadPoolBase {
+ #endif
+     return num_threads;
++#endif
+   }
+ };
+ 
+diff --git a/aten/src/ATen/ParallelNative.cpp b/aten/src/ATen/ParallelNative.cpp
+index 38acac1..9f89cda 100644
+--- a/aten/src/ATen/ParallelNative.cpp
++++ b/aten/src/ATen/ParallelNative.cpp
+@@ -213,6 +213,12 @@ void init_num_threads() {
+ }
+ 
+ void set_num_threads(int nthreads) {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  TORCH_CHECK(
++      nthreads == 1,
++      "This PyTorch WebAssembly build is single-threaded; nthreads must be 1");
++  return;
++#else
+ #ifndef C10_MOBILE
+   TORCH_CHECK(nthreads > 0, "Expected positive number of threads");
+   int no_value = NOT_SET;
+@@ -235,9 +241,13 @@ void set_num_threads(int nthreads) {
+   TORCH_INTERNAL_ASSERT(pool, "Invalid thread pool!");
+   pool->set_thread_count(nthreads);
+ #endif // C10_MOBILE
++#endif // PYTORCH_WASM_NO_THREADS
+ }
+ 
+ int get_num_threads() {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  return 1;
++#else
+   at::internal::lazy_init_num_threads();
+ #ifndef C10_MOBILE
+   // not initializing pool unnecessarily,
+@@ -256,6 +266,7 @@ int get_num_threads() {
+   TORCH_INTERNAL_ASSERT(pool, "Invalid thread pool!")
+   return in_parallel_region() ? 1 /* current thread */ : pool->get_thread_count();
+ #endif // C10_MOBILE
++#endif // PYTORCH_WASM_NO_THREADS
+ }
+ 
+ int get_thread_num() {
+@@ -264,6 +275,9 @@ int get_thread_num() {
+ }
+ 
+ bool in_parallel_region() {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  return in_parallel_region_;
++#else
+ #ifndef C10_MOBILE
+   return in_parallel_region_ || (
+     num_intraop_threads.load() == CONSUMED &&
+@@ -273,9 +287,13 @@ bool in_parallel_region() {
+ #else
+   return in_parallel_region_;
+ #endif // C10_MOBILE
++#endif // PYTORCH_WASM_NO_THREADS
+ }
+ 
+ void intraop_launch(std::function<void()> func) {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  func();
++#else
+ #ifndef C10_MOBILE
+   if (!in_parallel_region() && get_num_threads() > 1) {
+     _get_intraop_pool().run(std::move(func));
+@@ -288,9 +306,16 @@ void intraop_launch(std::function<void()> func) {
+   func();
+ #endif // C10_MOBILE
++#endif // PYTORCH_WASM_NO_THREADS
+ }
+ 
+ c10::intrusive_ptr<c10::ivalue::Future> intraop_launch_future(
+     std::function<void()> func) {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  auto future = c10::make_intrusive<c10::ivalue::Future>(c10::NoneType::get());
++  func();
++  future->markCompleted();
++  return future;
++#else
+ #ifndef C10_MOBILE
+   auto future = c10::make_intrusive<c10::ivalue::Future>(c10::NoneType::get());
+   if (!in_parallel_region() && get_num_threads() > 1) {
+@@ -313,6 +338,7 @@ c10::intrusive_ptr<c10::ivalue::Future> intraop_launch_future(
+   future->markCompleted();
+   return future;
+ #endif // C10_MOBILE
++#endif // PYTORCH_WASM_NO_THREADS
+ }
+ 
+ } // namespace at
+diff --git a/aten/src/ATen/ParallelThreadPoolNative.cpp b/aten/src/ATen/ParallelThreadPoolNative.cpp
+index fc6f6c4..7aa71da 100644
+--- a/aten/src/ATen/ParallelThreadPoolNative.cpp
++++ b/aten/src/ATen/ParallelThreadPoolNative.cpp
+@@ -46,5 +46,11 @@ C10_REGISTER_CREATOR(ThreadPoolRegistry, C10, create_c10_threadpool);
+ 
+ void set_num_interop_threads(int nthreads) {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  TORCH_CHECK(
++      nthreads == 1,
++      "This PyTorch WebAssembly build is single-threaded; nthreads must be 1");
++  return;
++#else
+   TORCH_CHECK(nthreads > 0, "Expected positive number of threads");
+ 
+   int no_value = NOT_SET;
+@@ -53,8 +59,12 @@ void set_num_interop_threads(int nthreads) {
+       "Error: cannot set number of interop threads after parallel work "
+       "has started or set_num_interop_threads called");
++#endif
+ }
+ 
+ int get_num_interop_threads() {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  return 1;
++#else
+   at::internal::lazy_init_num_threads();
+   int nthreads = num_interop_threads.load();
+   if (nthreads > 0) {
+@@ -67,13 +77,18 @@ int get_num_interop_threads() {
+     return get_pool().size();
+   }
++#endif
+ }
+ 
+ namespace internal {
+ void launch_no_thread_state(std::function<void()> fn) {
++#if defined(PYTORCH_WASM_NO_THREADS)
++  fn();
++#else
+ #if AT_EXPERIMENTAL_SINGLE_THREAD_POOL
+   intraop_launch(std::move(fn));
+ #else
+   get_pool().run(std::move(fn));
+ #endif
++#endif
+ }
+ } // namespace internal
+diff --git a/torch/csrc/autograd/engine.cpp b/torch/csrc/autograd/engine.cpp
+index 9322a29..cdedddd 100644
+--- a/torch/csrc/autograd/engine.cpp
++++ b/torch/csrc/autograd/engine.cpp
+@@ -62,7 +62,7 @@ static bool in_bad_autograd_fork = false;
+ 
+ // Should be called before unsafe for forks (thread pool) calls
+ static void track_bad_autograd_forks() {
+-#if !defined(WIN32)
++#if !defined(WIN32) && !defined(PYTORCH_WASM_NO_THREADS)
+   static c10::once_flag flag;
+   c10::call_once(
+       flag, [&] { pthread_atfork(nullptr, nullptr, forked_autograd_child); });
+@@ -1320,7 +1320,14 @@ c10::intrusive_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
+     queue->push(
+         NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
+ 
+-    if (current_depth >= max_recursion_depth_) {
++    const bool use_reentrant_thread_pool =
++#if defined(PYTORCH_WASM_NO_THREADS)
++        false;
++#else
++        current_depth >= max_recursion_depth_;
++#endif
++
++    if (use_reentrant_thread_pool) {
+       // See Note [Reentrant backwards]
+       // If reached the max depth, switch to a different thread
+       add_thread_pool_task(graph_task);
+-- 
+2.47.2

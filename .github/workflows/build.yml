@@ -1,0 +1,167 @@
+name: Build PyTorch wheel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["torch-*-pyodide-*"]
+    paths:
+      - "config/**"
+      - "patches/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/build.yml"
+
+concurrency:
+  group: pytorch-pyodide-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out build repository
+        uses: actions/checkout@v4
+
+      - name: Read pinned configuration
+        id: config
+        run: |
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+          python3 scripts/config.py env >> "$GITHUB_ENV"
+
+      - name: Check out pinned PyTorch source
+        uses: actions/checkout@v4
+        with:
+          repository: pytorch/pytorch
+          ref: ${{ steps.config.outputs.pytorch_ref }}
+          path: pytorch
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply ordered patches
+        run: scripts/apply_patches.sh pytorch
+
+      - name: Set up host Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.config.outputs.python_version }}
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "pyodide-build==${PYODIDE_BUILD_VERSION}" \
+            ninja
+          sudo apt-get update
+          sudo apt-get install --yes ccache
+          pyodide config get emscripten_version
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-${{ hashFiles('patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-
+
+      - name: Build native protoc from the pinned submodule
+        run: scripts/build_host_protoc.sh pytorch "$RUNNER_TEMP/pytorch-host-protobuf"
+
+      - name: Set up pinned Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ steps.config.outputs.emscripten_version }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Build raw WebAssembly wheel
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+          DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
+          PYTORCH_HOST_PROTOC: ${{ runner.temp }}/pytorch-host-protobuf/bin/protoc
+        run: |
+          ccache --zero-stats
+          SOURCE_DATE_EPOCH="$(git -C pytorch show -s --format=%ct HEAD)"
+          echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
+          scripts/build_wheel.sh pytorch wheelhouse/raw
+          ccache --show-stats
+
+      - name: Prune and validate wheel
+        id: wheel
+        run: |
+          mapfile -t raw_wheels < <(find wheelhouse/raw -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#raw_wheels[@]}" -eq 1
+          python scripts/postprocess_wheel.py \
+            "${raw_wheels[0]}" \
+            --output-dir wheelhouse/dist \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          mapfile -t wheels < <(find wheelhouse/dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          python scripts/validate_wheel.py "${wheels[0]}"
+          sha256sum "${wheels[0]}" > "${wheels[0]}.sha256"
+          python scripts/release_manifest.py \
+            "${wheels[0]}" \
+            --output wheelhouse/dist/build-manifest.json
+          echo "path=${wheels[0]}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "${wheels[0]}")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Test inside pinned Pyodide
+        run: |
+          npm install --no-save "pyodide@$PYODIDE_VERSION"
+          node tests/smoke.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "$PYTORCH_VERSION" \
+            "$PYTORCH_REF"
+
+      - name: Upload wheel and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
+          path: wheelhouse/dist/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Attest wheel provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            wheelhouse/dist/*.whl
+            wheelhouse/dist/*.sha256
+            wheelhouse/dist/build-manifest.json
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            wheelhouse/dist/*
+
+      - name: Upload CMake diagnostics after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmake-diagnostics-${{ github.run_id }}
+          path: |
+            pytorch/build/CMakeCache.txt
+            pytorch/build/CMakeFiles/CMakeError.log
+            pytorch/build/CMakeFiles/CMakeOutput.log
+          if-no-files-found: ignore
+          retention-days: 14

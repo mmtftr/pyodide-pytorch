@@ -1,0 +1,33 @@
+name: Validate repository
+
+on:
+  pull_request:
+  push:
+    paths:
+      - "config/**"
+      - "patches/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate manifest and tools
+        run: |
+          python scripts/config.py check
+          python scripts/validate_patches.py
+          python -m compileall -q scripts tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Validate shell syntax and whitespace
+        run: |
+          bash -n scripts/*.sh
+          git diff --check HEAD

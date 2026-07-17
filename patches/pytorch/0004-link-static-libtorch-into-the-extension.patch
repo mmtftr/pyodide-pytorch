@@ -1,0 +1,63 @@
+From 65ff9916699b31d968a17a06cf5bc97c849963c2 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Thu, 17 Jul 2026 00:00:03 +0300
+Subject: [PATCH 4/4] Link static libtorch into the extension
+
+Pyodide loads one WebAssembly side module. When BUILD_SHARED_LIBS is disabled,
+setuptools otherwise links only libtorch_python.a and loses ATen operators and
+their static registrars. Whole-archive the two registrar-bearing archives and
+resolve their smaller support archives as a group.
+---
+ setup.py | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/setup.py b/setup.py
+index 55f333e..81831dd 100644
+--- a/setup.py
++++ b/setup.py
+@@ -939,6 +939,43 @@ def configure_extension_build():
+     main_link_args = []
+     main_sources = ["torch/csrc/stub.c"]
+ 
++    if (
++        cmake_cache_vars["CMAKE_SYSTEM_NAME"] == "Emscripten"
++        and not cmake_cache_vars["BUILD_SHARED_LIBS"]
++    ):
++        whole_archives = [
++            os.path.join(lib_path, "libtorch_python.a"),
++            os.path.join(lib_path, "libtorch_cpu.a"),
++        ]
++        support_archives = [
++            os.path.join(lib_path, name)
++            for name in (
++                "libc10.a",
++                "libshm.a",
++                "libfmt.a",
++                "libprotobuf.a",
++                "libcpuinfo.a",
++                "libclog.a",
++            )
++            if os.path.exists(os.path.join(lib_path, name))
++        ]
++        missing_archives = [
++            path for path in whole_archives if not os.path.exists(path)
++        ]
++        if missing_archives:
++            raise RuntimeError(
++                "Missing static libraries for the WebAssembly extension: "
++                + ", ".join(missing_archives)
++            )
++        main_libraries = []
++        main_link_args.extend(
++            ["-Wl,--whole-archive"]
++            + whole_archives
++            + ["-Wl,--no-whole-archive", "-Wl,--start-group"]
++            + support_archives
++            + ["-Wl,--end-group"]
++        )
++
+     if cmake_cache_vars["USE_CUDA"]:
+         library_dirs.append(os.path.dirname(cmake_cache_vars["CUDA_CUDA_LIB"]))
+ 
+-- 
+2.47.2

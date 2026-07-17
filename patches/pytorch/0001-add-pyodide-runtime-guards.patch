@@ -1,0 +1,73 @@
+From 2e2a290db4d7807b0f971455afafea052d37fb0d Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Thu, 17 Jul 2026 00:00:00 +0300
+Subject: [PATCH 1/4] Add Pyodide runtime guards
+
+Avoid native dynamic-library and shared-memory setup in Pyodide. Emscripten's
+size_t also needs the explicit symbolic integer overload, while its libc owns
+the __assert_fail declaration.
+---
+ c10/core/SymInt.h   | 2 +-
+ c10/macros/Macros.h | 2 ++
+ torch/__init__.py   | 5 +++++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/c10/core/SymInt.h b/c10/core/SymInt.h
+index 23eaf7f..074d4c5 100644
+--- a/c10/core/SymInt.h
++++ b/c10/core/SymInt.h
+@@ -336,7 +336,7 @@ DECLARE_SYMINT_OP(float, SymFloat) // just for completeness
+ 
+ // On OSX size_t is different than uint64_t so we have to
+ // define it separately
+-#if defined(__APPLE__)
++#if defined(__APPLE__) || defined(__EMSCRIPTEN__)
+ DECLARE_SYMINT_OP_INTONLY(size_t, SymInt)
+ DECLARE_SYMINT_OP(size_t, SymInt)
+ #endif
+diff --git a/c10/macros/Macros.h b/c10/macros/Macros.h
+index 7abc7d3..e8ad5a8 100644
+--- a/c10/macros/Macros.h
++++ b/c10/macros/Macros.h
+@@ -382,7 +382,8 @@ __host__ __device__
+ // and host side code.
+ __host__ __device__
+ #endif
+ 
++#if !defined(__EMSCRIPTEN__)
+     // This forward declaration matching the declaration of __assert_fail
+     // exactly how it is in glibc in case parts of the program are compiled with
+     // different NDEBUG settings. Otherwise we might get 'ambiguous declaration'
+@@ -392,6 +393,7 @@ __host__ __device__
+         const char* file,
+         unsigned int line,
+         const char* function) noexcept __attribute__((__noreturn__));
++#endif
+ 
+ #if (defined(__HIP_ARCH__) || defined(__HIP__)) && \
+     !defined(TORCH_DISABLE_GPU_ASSERTS)
+diff --git a/torch/__init__.py b/torch/__init__.py
+index 47e127e..1cf03bf 100644
+--- a/torch/__init__.py
++++ b/torch/__init__.py
+@@ -163,6 +163,9 @@ def _preload_cuda_deps(lib_folder, lib_name):
+ 
+ # See Note [Global dependencies]
+ def _load_global_deps() -> None:
++    if sys.platform == "emscripten":
++        return
++
+     if _running_with_deploy() or platform.system() == 'Windows':
+         return
+ 
+@@ -1313,6 +1316,8 @@ from ._tensor_str import set_printoptions
+ ################################################################################
+ 
+ def manager_path():
++    if sys.platform == "emscripten":
++        return b""
+     if _running_with_deploy() or platform.system() == 'Windows':
+         return b""
+     path = get_file_path('torch', 'bin', 'torch_shm_manager')
+-- 
+2.47.2

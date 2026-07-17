@@ -1,0 +1,15 @@
+[pytorch]
+repository = "https://github.com/pytorch/pytorch.git"
+ref = "7bcf7da3a268b435777fe87c7794c382f444e86d"
+version = "2.1.0a0+git7bcf7da.pyodide0.24.1"
+
+[pyodide]
+version = "0.24.1"
+build_version = "0.24.1"
+python_version = "3.11.2"
+python_tag = "cp311"
+emscripten_version = "3.1.45"
+
+[build]
+max_jobs = 3
+maximum_wheel_mib = 80

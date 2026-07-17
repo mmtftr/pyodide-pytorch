@@ -1,0 +1,34 @@
+name: Build or runtime failure
+description: Report a reproducible wheel build or Pyodide runtime failure.
+title: "[failure] "
+labels: [bug]
+body:
+  - type: input
+    id: release
+    attributes:
+      label: Release or workflow run
+      description: Link the release asset or GitHub Actions run.
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime
+      description: Browser/Node version and exact Pyodide URL or npm version.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest complete JavaScript and Python example.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Complete error output
+      render: text
+    validations:
+      required: true
