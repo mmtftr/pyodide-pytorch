@@ -66,7 +66,8 @@ jobs:
           python -m pip install \
             "pyodide-build==${PYODIDE_BUILD_VERSION}" \
             "wheel==${WHEEL_VERSION}" \
-            "ninja==${NINJA_VERSION}"
+            "ninja==${NINJA_VERSION}" \
+            "cmake==${CMAKE_VERSION}"
           sudo apt-get update
           sudo apt-get install --yes ccache
           pyodide config get emscripten_version

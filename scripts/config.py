@@ -28,6 +28,7 @@ ENV_KEYS = {
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
     "WHEEL_VERSION": ("host_tools", "wheel_version"),
     "NINJA_VERSION": ("host_tools", "ninja_version"),
+    "CMAKE_VERSION": ("host_tools", "cmake_version"),
 }
 
 
@@ -58,6 +59,7 @@ def validate(config: dict[str, Any]) -> list[str]:
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
         wheel_version = str(lookup(config, ("host_tools", "wheel_version")))
         ninja_version = str(lookup(config, ("host_tools", "ninja_version")))
+        cmake_version = str(lookup(config, ("host_tools", "cmake_version")))
     except (KeyError, TypeError, ValueError) as exc:
         return [f"missing or invalid manifest value: {exc}"]
 
@@ -85,6 +87,7 @@ def validate(config: dict[str, Any]) -> list[str]:
     for name, value in (
         ("host_tools.wheel_version", wheel_version),
         ("host_tools.ninja_version", ninja_version),
+        ("host_tools.cmake_version", cmake_version),
     ):
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", value):
             errors.append(f"{name} must be an exact numeric version")

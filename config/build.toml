@@ -18,3 +18,4 @@ maximum_wheel_mib = 80
 # auditwheel-emscripten 0.0.x imports wheel.cli, removed in Wheel 0.46.
 wheel_version = "0.45.1"
 ninja_version = "1.13.0"
+cmake_version = "3.27.9"
