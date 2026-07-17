@@ -8,6 +8,8 @@ Each wheel is tied to one CPython/Emscripten ABI. The initial baseline is:
 | Pyodide | `0.24.1` |
 | CPython | `3.11.2` / `cp311` |
 | Emscripten | `3.1.45` |
+| Wheel | `0.45.1` (last release providing `wheel.cli` for the pinned auditwheel plugin) |
+| Ninja | `1.13.0` |
 
 The wheel is CPU-only and intentionally has no WebAssembly shared memory. Both
 ATen thread counts are fixed at one, and inter-op work runs inline. This avoids

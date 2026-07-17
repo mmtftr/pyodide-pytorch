@@ -13,3 +13,8 @@ emscripten_version = "3.1.45"
 [build]
 max_jobs = 3
 maximum_wheel_mib = 80
+
+[host_tools]
+# auditwheel-emscripten 0.0.x imports wheel.cli, removed in Wheel 0.46.
+wheel_version = "0.45.1"
+ninja_version = "1.13.0"

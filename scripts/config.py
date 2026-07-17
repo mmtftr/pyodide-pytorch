@@ -26,6 +26,8 @@ ENV_KEYS = {
     "EMSCRIPTEN_VERSION": ("pyodide", "emscripten_version"),
     "MAX_JOBS": ("build", "max_jobs"),
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
+    "WHEEL_VERSION": ("host_tools", "wheel_version"),
+    "NINJA_VERSION": ("host_tools", "ninja_version"),
 }
 
 
@@ -54,6 +56,8 @@ def validate(config: dict[str, Any]) -> list[str]:
         emscripten = str(lookup(config, ("pyodide", "emscripten_version")))
         max_jobs = int(lookup(config, ("build", "max_jobs")))
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
+        wheel_version = str(lookup(config, ("host_tools", "wheel_version")))
+        ninja_version = str(lookup(config, ("host_tools", "ninja_version")))
     except (KeyError, TypeError, ValueError) as exc:
         return [f"missing or invalid manifest value: {exc}"]
 
@@ -78,6 +82,12 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("build.max_jobs must be between 1 and 16")
     if not 20 <= max_wheel <= 500:
         errors.append("build.maximum_wheel_mib must be between 20 and 500")
+    for name, value in (
+        ("host_tools.wheel_version", wheel_version),
+        ("host_tools.ninja_version", ninja_version),
+    ):
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", value):
+            errors.append(f"{name} must be an exact numeric version")
     return errors
 
 
