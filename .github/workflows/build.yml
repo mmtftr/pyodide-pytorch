@@ -74,15 +74,34 @@ jobs:
           pyodide config get emscripten_version
 
       - name: Restore compiler cache
-        uses: actions/cache@v4
+        id: ccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
           key: ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-${{ hashFiles('patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}
           restore-keys: |
             ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-
 
+      - name: Restore native protoc cache
+        id: protoc-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pytorch-host-protobuf
+          key: host-protoc-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.cmake_version }}
+
       - name: Build native protoc from the pinned submodule
+        if: steps.protoc-restore.outputs.cache-hit != 'true'
         run: scripts/build_host_protoc.sh pytorch "$RUNNER_TEMP/pytorch-host-protobuf"
+
+      - name: Verify native protoc
+        run: test -x "$RUNNER_TEMP/pytorch-host-protobuf/bin/protoc"
+
+      - name: Save native protoc cache
+        if: steps.protoc-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/pytorch-host-protobuf
+          key: host-protoc-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.cmake_version }}
 
       - name: Set up pinned Emscripten
         uses: mymindstorm/setup-emsdk@v14
@@ -102,6 +121,13 @@ jobs:
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
           scripts/build_wheel.sh pytorch wheelhouse/raw
           ccache --show-stats
+
+      - name: Save compiler cache
+        if: ${{ always() && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-${{ hashFiles('patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}
 
       - name: Prune and validate wheel
         id: wheel
