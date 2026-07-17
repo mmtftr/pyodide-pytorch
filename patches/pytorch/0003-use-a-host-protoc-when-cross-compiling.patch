@@ -1,7 +1,7 @@
 From 8d59cd78297534cdb6e32bd5bfd6bfeb3d9e17ac Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Thu, 17 Jul 2026 00:00:02 +0300
-Subject: [PATCH 3/4] Use a host protoc when cross-compiling
+Subject: [PATCH 3/5] Use a host protoc when cross-compiling
 
 The target protoc is a WebAssembly program and cannot be executed during the
 build. Require the workflow to provide the matching, natively compiled protoc

@@ -1,7 +1,7 @@
 From 2e2a290db4d7807b0f971455afafea052d37fb0d Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Thu, 17 Jul 2026 00:00:00 +0300
-Subject: [PATCH 1/4] Add Pyodide runtime guards
+Subject: [PATCH 1/5] Add Pyodide runtime guards
 
 Avoid native dynamic-library and shared-memory setup in Pyodide. Emscripten's
 size_t also needs the explicit symbolic integer overload, while its libc owns

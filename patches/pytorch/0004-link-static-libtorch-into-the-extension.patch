@@ -1,7 +1,7 @@
 From 65ff9916699b31d968a17a06cf5bc97c849963c2 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Thu, 17 Jul 2026 00:00:03 +0300
-Subject: [PATCH 4/4] Link static libtorch into the extension
+Subject: [PATCH 4/5] Link static libtorch into the extension
 
 Pyodide loads one WebAssembly side module. When BUILD_SHARED_LIBS is disabled,
 setuptools otherwise links only libtorch_python.a and loses ATen operators and

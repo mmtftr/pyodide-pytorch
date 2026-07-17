@@ -1,0 +1,35 @@
+From 20b8a15cf65fd390f6402a038cab78115a576953 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Thu, 17 Jul 2026 00:00:04 +0300
+Subject: [PATCH 5/5] Scope Clang getter cast diagnostic on Emscripten
+
+PyTorch enables -Werror=cast-function-type for C++ builds. Clang's strict
+subgroup diagnoses the generated CPython PyGetSetDef adapters, whose typed
+getters are intentionally cast to Python's generic callback signature. Keep
+the diagnostic visible, but do not make that known pattern fatal. Scope the
+override to torch_python so unrelated cached objects retain their exact
+compiler command.
+---
+ torch/CMakeLists.txt | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
+--- a/torch/CMakeLists.txt
++++ b/torch/CMakeLists.txt
+@@ -317,8 +317,14 @@ if(USE_PRECOMPILED_HEADERS)
+       "$<$<COMPILE_LANGUAGE:CXX>:ATen/ATen.h>")
+ endif()
+ 
+ if(NOT MSVC)
+   target_compile_options(torch_python PRIVATE -Wno-unused-variable)
+ endif()
+ 
++if(EMSCRIPTEN)
++  # Generated PyGetSetDef tables intentionally adapt typed getter callbacks.
++  target_compile_options(
++    torch_python PRIVATE -Wno-error=cast-function-type-strict)
++endif()
++
+ # Required workaround for generated sources
+-- 
+2.47.2

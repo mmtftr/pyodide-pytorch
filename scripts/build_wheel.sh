@@ -84,12 +84,7 @@ export USE_XNNPACK=0
 export USE_ZMQ=0
 export USE_ZSTD=0
 
-# PyTorch's generated CPython getter tables intentionally adapt typed getter
-# functions to PyGetSetDef's generic callback signature. Clang diagnoses those
-# C-style casts through the strict subgroup enabled by PyTorch's broader
-# -Werror=cast-function-type flag. Keep the diagnostic visible, but do not make
-# this known binding pattern fatal for the Emscripten build.
-export CXXFLAGS="${CXXFLAGS:-} -fexceptions -Wno-error=cast-function-type-strict"
+export CXXFLAGS="${CXXFLAGS:-} -fexceptions"
 export LDFLAGS="${LDFLAGS:-} -sDISABLE_EXCEPTION_CATCHING=0"
 
 if command -v ccache >/dev/null 2>&1; then
