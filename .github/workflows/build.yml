@@ -163,7 +163,7 @@ jobs:
 
       - name: Upload unverified wheel after validation or smoke failure
         if: ${{ failure() && steps.wheel.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unverified-torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: |
@@ -174,7 +174,7 @@ jobs:
           compression-level: 0
 
       - name: Upload wheel and provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: wheelhouse/dist/*
@@ -203,7 +203,7 @@ jobs:
 
       - name: Upload CMake diagnostics after failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cmake-diagnostics-${{ github.run_id }}
           path: |
