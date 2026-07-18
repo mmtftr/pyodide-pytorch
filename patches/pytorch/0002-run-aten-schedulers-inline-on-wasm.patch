@@ -1,7 +1,7 @@
 From c9bd3669f4d1cfb2d0571d6599454cde569f1327 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Fri, 17 Jul 2026 00:00:01 +0300
-Subject: [PATCH 2/5] Run ATen schedulers inline on threadless Wasm
+Subject: [PATCH 2/6] Run ATen schedulers inline on threadless Wasm
 
 Define PYTORCH_WASM_NO_THREADS for the Emscripten build. Report exactly one intra-op and inter-op thread, reject attempts to increase the counts, and execute scheduled work synchronously.
 ---
@@ -218,4 +218,3 @@ index 9e6a04d..39c50b2 100644
        add_thread_pool_task(graph_task);
 -- 
 2.51.1
-

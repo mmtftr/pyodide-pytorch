@@ -2,6 +2,7 @@ name: Build PyTorch wheel
 
 on:
   workflow_dispatch:
+  create:
   push:
     branches: [main]
     tags: ["torch-*-pyodide-*"]
@@ -14,7 +15,7 @@ on:
 
 concurrency:
   group: pytorch-pyodide-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'create' }}
 
 permissions:
   contents: write
@@ -24,6 +25,13 @@ permissions:
 
 jobs:
   build:
+    if: >-
+      github.event_name != 'create' ||
+      (
+        github.event.ref_type == 'branch' &&
+        startsWith(github.event.ref, 'release/torch-') &&
+        contains(github.event.ref, '-pyodide-')
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -41,6 +49,29 @@ jobs:
           python3 scripts/config.py check
           python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
           python3 scripts/config.py env >> "$GITHUB_ENV"
+
+      - name: Verify release request
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
+        env:
+          CREATED_REF: ${{ github.event.ref }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
+            requested_tag="${CREATED_REF#release/}"
+          else
+            requested_tag="$GITHUB_REF_NAME"
+          fi
+          if [[ "$requested_tag" != "$RELEASE_TAG" ]]; then
+            echo "::error::Requested release $requested_tag does not match pinned $RELEASE_TAG"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
+            git fetch --no-tags --depth=1 origin main
+            main_sha="$(git rev-parse FETCH_HEAD)"
+            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+              echo "::error::Release branches must point at the current main commit $main_sha"
+              exit 1
+            fi
+          fi
 
       - name: Check out pinned PyTorch source
         uses: actions/checkout@v4
@@ -141,7 +172,12 @@ jobs:
           mapfile -t wheels < <(find wheelhouse/dist -maxdepth 1 -type f -name '*.whl' -print)
           test "${#wheels[@]}" -eq 1
           python scripts/validate_wheel.py "${wheels[0]}"
-          sha256sum "${wheels[0]}" > "${wheels[0]}.sha256"
+          wheel_dir="$(dirname "${wheels[0]}")"
+          wheel_name="$(basename "${wheels[0]}")"
+          (
+            cd "$wheel_dir"
+            sha256sum "$wheel_name" > "$wheel_name.sha256"
+          )
           python scripts/release_manifest.py \
             "${wheels[0]}" \
             --output wheelhouse/dist/build-manifest.json
@@ -190,15 +226,29 @@ jobs:
             wheelhouse/dist/*.sha256
             wheelhouse/dist/build-manifest.json
 
-      - name: Publish tagged release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
+            tag_ref="$(
+              gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+                --jq '.object.type + " " + .object.sha' 2>/dev/null || true
+            )"
+            if [[ -z "$tag_ref" ]]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+                -f ref="refs/tags/$RELEASE_TAG" \
+                -f sha="$GITHUB_SHA" >/dev/null
+            elif [[ "$tag_ref" != "commit $GITHUB_SHA" ]]; then
+              echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
+              exit 1
+            fi
+          fi
+          gh release create "$RELEASE_TAG" \
             --verify-tag \
             --generate-notes \
-            --title "$GITHUB_REF_NAME" \
+            --title "$RELEASE_TAG" \
             wheelhouse/dist/*
 
       - name: Upload CMake diagnostics after failure

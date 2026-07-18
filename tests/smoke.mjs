@@ -104,6 +104,17 @@ for setter in (torch.set_num_threads, torch.set_num_interop_threads):
     else:
         raise AssertionError(f"{setter.__name__}(2) unexpectedly succeeded")
 
+for setter in (torch.set_num_threads, torch.set_num_interop_threads):
+    try:
+        setter(2**65)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError(f"{setter.__name__}(2**65) unexpectedly succeeded")
+
+assert torch.get_num_threads() == 1
+assert torch.get_num_interop_threads() == 1
+
 x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
 loss = (x @ x).sum()
 loss.backward()

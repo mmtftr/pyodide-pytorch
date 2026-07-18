@@ -13,8 +13,9 @@ Each wheel is tied to one CPython/Emscripten ABI. The initial baseline is:
 | CMake | `3.27.9` (compatible with the pinned protobuf submodule's legacy policy floor) |
 
 The wheel is CPU-only and intentionally has no WebAssembly shared memory. Both
-ATen thread counts are fixed at one, and inter-op work runs inline. This avoids
-the cross-origin isolation and worker requirements of pthread-enabled Wasm.
+ATen thread counts are fixed at one, and inter-op work runs inline. Requests to
+set either count above one raise `RuntimeError`. This avoids the cross-origin
+isolation and worker requirements of pthread-enabled Wasm.
 
 Unsupported or intentionally omitted areas include CUDA/ROCm, distributed
 training, multiprocessing/shared-memory tensors, OpenMP, MKL/MKLDNN, NNPACK,

@@ -10,6 +10,9 @@ python_version = "3.11.2"
 python_tag = "cp311"
 emscripten_version = "3.1.45"
 
+[release]
+tag = "torch-2.1.0a0-git7bcf7da-pyodide-0.24.1-r1"
+
 [build]
 max_jobs = 3
 maximum_wheel_mib = 80
