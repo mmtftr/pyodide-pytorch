@@ -44,6 +44,17 @@ def wasm_with_imported_memory(*, shared: bool) -> bytes:
     return b"\0asm\x01\0\0\0" + b"\x02" + uleb(len(payload)) + payload
 
 
+def wasm_with_dynamic_libraries(*libraries: str) -> bytes:
+    def string(value: str) -> bytes:
+        encoded = value.encode()
+        return uleb(len(encoded)) + encoded
+
+    needed = uleb(len(libraries)) + b"".join(string(name) for name in libraries)
+    dylink = uleb(2) + uleb(len(needed)) + needed
+    payload = string("dylink.0") + dylink
+    return b"\0asm\x01\0\0\0" + b"\x00" + uleb(len(payload)) + payload
+
+
 class ToolTests(unittest.TestCase):
     def test_manifest_is_valid(self) -> None:
         self.assertEqual(config.validate(config.load()), [])
@@ -54,6 +65,25 @@ class ToolTests(unittest.TestCase):
                 wasm_with_imported_memory(shared=False)
             )
         )
+        self.assertTrue(
+            validate_wheel.wasm_uses_shared_memory(
+                wasm_with_imported_memory(shared=True)
+            )
+        )
+
+    def test_dynamic_library_detection(self) -> None:
+        self.assertEqual(
+            validate_wheel.wasm_dynamic_libraries(
+                wasm_with_dynamic_libraries("libtorch_python.so", "libshm.so")
+            ),
+            ["libtorch_python.so", "libshm.so"],
+        )
+        self.assertEqual(
+            validate_wheel.wasm_dynamic_libraries(
+                wasm_with_imported_memory(shared=False)
+            ),
+            [],
+        )
 
     def test_pyodide_toolchain_repair_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -63,11 +93,6 @@ class ToolTests(unittest.TestCase):
             destination.write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "does not match"):
                 repair_pyodide_build.install_toolchain(destination)
-        self.assertTrue(
-            validate_wheel.wasm_uses_shared_memory(
-                wasm_with_imported_memory(shared=True)
-            )
-        )
 
     def test_postprocess_prunes_and_produces_a_valid_wheel(self) -> None:
         values = config.flat_env(config.load())

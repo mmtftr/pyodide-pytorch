@@ -125,6 +125,33 @@ def wasm_uses_shared_memory(data: bytes) -> bool:
     return False
 
 
+def wasm_dynamic_libraries(data: bytes) -> list[str]:
+    """Return DT_NEEDED-style entries from Emscripten's dylink.0 section."""
+    if not data.startswith(b"\0asm\x01\0\0\0"):
+        raise WasmFormatError("invalid WebAssembly magic or version")
+    module = Reader(data, 8)
+    libraries: list[str] = []
+    while module.position < len(module.data):
+        section_id = module.byte()
+        payload = Reader(module.take(module.uleb()))
+        if section_id != 0:
+            continue
+        name = payload.string()
+        if name == "dylink":
+            raise WasmFormatError("legacy dylink custom sections are unsupported")
+        if name != "dylink.0":
+            continue
+        while payload.position < len(payload.data):
+            subsection_type = payload.uleb()
+            subsection = Reader(payload.take(payload.uleb()))
+            if subsection_type != 2:
+                continue
+            libraries.extend(subsection.string() for _ in range(subsection.uleb()))
+            if subsection.position != len(subsection.data):
+                raise WasmFormatError("trailing data in dylink.0 needed subsection")
+    return libraries
+
+
 def urlsafe_digest(data: bytes) -> str:
     value = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
     return "sha256=" + value.decode("ascii")
@@ -223,6 +250,12 @@ def validate(path: Path) -> dict[str, object]:
         extension_data = wheel.read(extensions[0])
         if wasm_uses_shared_memory(extension_data):
             raise ValueError("torch._C uses shared memory or the WebAssembly atomics feature")
+        dynamic_libraries = wasm_dynamic_libraries(extension_data)
+        if dynamic_libraries:
+            raise ValueError(
+                "torch._C is not self-contained; dynamic libraries: "
+                + ", ".join(dynamic_libraries)
+            )
 
         validate_record(wheel, record_path)
 
@@ -231,6 +264,7 @@ def validate(path: Path) -> dict[str, object]:
         "bytes": path.stat().st_size,
         "tag": expected_tag,
         "extensions": extensions,
+        "dynamic_libraries": dynamic_libraries,
         "threading": "single",
         "shared_memory": False,
     }

@@ -1,0 +1,2 @@
+# Unified diff context markers may be the only byte on an otherwise blank line.
+*.patch -whitespace

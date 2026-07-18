@@ -161,6 +161,16 @@ jobs:
             "$PYTORCH_VERSION" \
             "$PYTORCH_REF"
 
+      - name: Upload unverified wheel after smoke failure
+        if: ${{ failure() && steps.wheel.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unverified-torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
+          path: wheelhouse/dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
       - name: Upload wheel and provenance
         uses: actions/upload-artifact@v4
         with:
@@ -198,6 +208,7 @@ jobs:
             pytorch/build/CMakeCache.txt
             pytorch/build/CMakeFiles/CMakeError.log
             pytorch/build/CMakeFiles/CMakeOutput.log
+            pytorch/build/build.ninja
           if-no-files-found: ignore
           retention-days: 14
 
