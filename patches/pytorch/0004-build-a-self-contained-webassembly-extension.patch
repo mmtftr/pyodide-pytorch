@@ -1,0 +1,278 @@
+From 1fa6971e2faec45934d5ef7c04a2e7544a3c3e2a Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Fri, 17 Jul 2026 00:00:03 +0300
+Subject: [PATCH 4/5] Build a self-contained WebAssembly extension
+
+Pyodide loads one WebAssembly side module, while PyTorch normally links its
+Python binding and transitive dependencies as separate libraries. Build
+torch_python as an archive and link the complete static closure into torch._C,
+preserving whole-archive semantics for operator and ONNX registrars.
+
+The POSIX shared-memory manager cannot run under Pyodide. Omit libshm and
+provide clear file-sharing stubs without disturbing storage weak references.
+Compile the Emscripten cpuinfo implementation and omit disabled lazy
+TorchScript backend bindings so the side module has no unresolved PyTorch
+symbols.
+---
+ cmake/Dependencies.cmake        |  6 +++++
+ setup.py                        | 41 +++++++++++++++++++++++++++++++++
+ torch/CMakeLists.txt            | 17 ++++++++++++--
+ torch/csrc/Module.cpp           |  4 ++++
+ torch/csrc/StorageSharing.cpp   | 15 ++++++++++++
+ torch/csrc/lazy/python/init.cpp | 33 ++++++++++++++++++++------
+ 6 files changed, 107 insertions(+), 9 deletions(-)
+
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index c3abce5..e73d322 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -478,6 +478,12 @@ elseif(NOT TARGET cpuinfo)
+   add_subdirectory(
+     "${CPUINFO_SOURCE_DIR}"
+     "${CONFU_DEPENDENCIES_BINARY_DIR}/cpuinfo")
++  if(EMSCRIPTEN)
++    # wasm32 misses cpuinfo's processor allowlist, but src/init.c dispatches
++    # to this implementation whenever __EMSCRIPTEN__ is defined.
++    target_sources(
++      cpuinfo PRIVATE "${CPUINFO_SOURCE_DIR}/src/emscripten/init.c")
++  endif()
+   # We build static version of cpuinfo but link
+   # them into a shared library for Caffe2, so they need PIC.
+   set_property(TARGET cpuinfo PROPERTY POSITION_INDEPENDENT_CODE ON)
+diff --git a/setup.py b/setup.py
+index 17bf16b..2f6ed6c 100644
+--- a/setup.py
++++ b/setup.py
+@@ -942,6 +942,47 @@ def configure_extension_build():
+     main_link_args = []
+     main_sources = ["torch/csrc/stub.c"]
+ 
++    if (
++        sysconfig.get_platform().startswith("emscripten")
++        and not cmake_cache_vars["BUILD_SHARED_LIBS"]
++    ):
++        static_library_dir = os.path.join(caffe2_build_dir, "lib")
++        whole_archives = [
++            os.path.join(static_library_dir, "libtorch_python.a"),
++            os.path.join(static_library_dir, "libtorch_cpu.a"),
++            os.path.join(static_library_dir, "libcaffe2_protos.a"),
++            os.path.join(static_library_dir, "libonnx.a"),
++            os.path.join(static_library_dir, "libtorch.a"),
++        ]
++        support_archives = [
++            os.path.join(static_library_dir, name)
++            for name in (
++                "libc10.a",
++                "libfoxi_loader.a",
++                "libonnx_proto.a",
++                "libprotobuf.a",
++                "libcpuinfo.a",
++                "libclog.a",
++            )
++        ]
++        required_archives = whole_archives + support_archives
++        missing_archives = [
++            path for path in required_archives if not os.path.exists(path)
++        ]
++        if missing_archives:
++            raise RuntimeError(
++                "Missing static libraries for the WebAssembly extension: "
++                + ", ".join(missing_archives)
++            )
++        main_libraries = []
++        main_link_args.extend(
++            ["-Wl,--whole-archive"]
++            + whole_archives
++            + ["-Wl,--no-whole-archive", "-Wl,--start-group"]
++            + support_archives
++            + ["-Wl,--end-group"]
++        )
++
+     if cmake_cache_vars["USE_CUDA"]:
+         library_dirs.append(os.path.dirname(cmake_cache_vars["CUDA_CUDA_LIB"]))
+ 
+diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
+index 62ee4c1..5e72703 100644
+--- a/torch/CMakeLists.txt
++++ b/torch/CMakeLists.txt
+@@ -31,7 +31,9 @@ else()
+ endif()
+ 
+ set(LIBSHM_SRCDIR ${TORCH_SRC_DIR}/lib/${LIBSHM_SUBDIR})
+-add_subdirectory(${LIBSHM_SRCDIR})
++if(NOT EMSCRIPTEN)
++  add_subdirectory(${LIBSHM_SRCDIR})
++endif()
+ 
+ 
+ # Generate files
+@@ -86,6 +88,9 @@ set(TORCH_PYTHON_LINK_LIBRARIES
+     shm
+     fmt::fmt-header-only
+     ATEN_CPU_FILES_GEN_LIB)
++if(EMSCRIPTEN)
++  list(REMOVE_ITEM TORCH_PYTHON_LINK_LIBRARIES shm)
++endif()
+ 
+ if(USE_ASAN AND TARGET Sanitizer::address)
+   list(APPEND TORCH_PYTHON_LINK_LIBRARIES Sanitizer::address)
+@@ -99,6 +104,10 @@ endif()
+ 
+ set(TORCH_PYTHON_COMPILE_DEFINITIONS)
+ 
++if(EMSCRIPTEN AND NOT BUILD_LAZY_TS_BACKEND)
++  list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS PYTORCH_WASM_NO_LAZY_TS_BACKEND=1)
++endif()
++
+ set(TORCH_PYTHON_PUBLIC_COMPILE_DEFINITIONS)
+ 
+ set(TORCH_PYTHON_COMPILE_OPTIONS)
+@@ -297,7 +306,11 @@ if(USE_COREML_DELEGATE)
+ endif()
+ 
+ 
+-add_library(torch_python SHARED ${TORCH_PYTHON_SRCS})
++if(EMSCRIPTEN)
++  add_library(torch_python STATIC ${TORCH_PYTHON_SRCS})
++else()
++  add_library(torch_python SHARED ${TORCH_PYTHON_SRCS})
++endif()
+ # Avoid numpy for the DEPLOY build
+ if(USE_NUMPY)
+   target_link_libraries(torch_python PRIVATE numpy::numpy)
+diff --git a/torch/csrc/Module.cpp b/torch/csrc/Module.cpp
+index 503eb8a..de718a8 100644
+--- a/torch/csrc/Module.cpp
++++ b/torch/csrc/Module.cpp
+@@ -22,7 +22,9 @@
+ #include <c10/util/Backtrace.h>
+ #include <c10/util/Logging.h>
+ #include <c10/util/irange.h>
++#ifndef __EMSCRIPTEN__
+ #include <libshm.h>
++#endif
+ #include <pybind11/pybind11.h>
+ #include <pybind11/stl.h>
+ #include <torch/csrc/THConcat.h>
+@@ -151,8 +153,10 @@ static PyObject* THPModule_initExtension(
+   torch::utils::initializeQSchemes();
+   torch::utils::initializeDtypes();
+   torch::tensors::initialize_python_bindings();
++#ifndef __EMSCRIPTEN__
+   std::string path = THPUtils_unpackString(shm_manager_path);
+   libshm_init(path.c_str());
++#endif
+ 
+   auto module = THPObjectPtr(PyImport_ImportModule("torch"));
+   if (!module)
+diff --git a/torch/csrc/StorageSharing.cpp b/torch/csrc/StorageSharing.cpp
+index 3669043..c7266b4 100644
+--- a/torch/csrc/StorageSharing.cpp
++++ b/torch/csrc/StorageSharing.cpp
+@@ -31,6 +31,21 @@
+ #include <atomic>
+ #include <string>
+ 
++#ifdef __EMSCRIPTEN__
++at::DataPtr THManagedMapAllocator::makeDataPtr(
++    const char*, const char*, int, size_t) {
++  TORCH_CHECK(
++      false,
++      "file-system shared storage is unavailable in this WebAssembly build");
++  return {};
++}
++
++THManagedMapAllocator* THManagedMapAllocator::fromDataPtr(
++    const at::DataPtr&) {
++  return nullptr;
++}
++#endif
++
+ static PyObject* THPStorage_sharedDecref(PyObject* self, PyObject* noargs) {
+   HANDLE_TH_ERRORS
+   const auto& storage = THPStorage_Unpack(self);
+diff --git a/torch/csrc/lazy/python/init.cpp b/torch/csrc/lazy/python/init.cpp
+index af4afb7..a278554 100644
+--- a/torch/csrc/lazy/python/init.cpp
++++ b/torch/csrc/lazy/python/init.cpp
+@@ -13,10 +13,11 @@
+ #include <torch/csrc/lazy/core/metrics.h>
+ #include <torch/csrc/lazy/core/trie.h>
+ #include <torch/csrc/lazy/python/python_util.h>
+-#if !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
++#if !defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND) && \
++    !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
+ #include <torch/csrc/lazy/ts_backend/ts_backend_impl.h>
+ #include <torch/csrc/lazy/ts_backend/ts_lowering_context.h>
+-#endif // FBCODE_CAFFE2 || OVRSOURCE
++#endif
+ #include <string>
+ #include <vector>
+ 
+@@ -208,11 +209,17 @@ void initLazyBindings(PyObject* module) {
+   });
+ 
+   lazy_ts_backend.def("_init", []() {
+-#if !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
++#if defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND)
++    TORCH_CHECK(
++        false,
++        "TorchScript backend is disabled in this WebAssembly build");
++#elif !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
+     torch::lazy::InitTorchScriptBackend();
+ #else
+-      TORCH_CHECK(false, "TorchScript backend not yet supported in FBCODE/OVRSOURCE builds");
+-#endif // !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
++    TORCH_CHECK(
++        false,
++        "TorchScript backend not yet supported in FBCODE/OVRSOURCE builds");
++#endif
+   });
+ 
+   /*
+@@ -223,7 +230,8 @@ void initLazyBindings(PyObject* module) {
+       "_get_tensors_ts_device_data_node",
+       [](const std::vector<at::Tensor>& tensors)
+           -> std::pair<std::vector<int64_t>, std::vector<at::IValue>> {
+-#if !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
++#if !defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND) && \
++    !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
+         std::vector<const Node*> roots;
+         for (auto& tensor : tensors) {
+           auto xtensor = TryGetLtcTensor(tensor);
+@@ -267,6 +275,12 @@ void initLazyBindings(PyObject* module) {
+           }
+         }
+         return std::make_pair(tensor_ids, ivalues);
++#elif defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND)
++        TORCH_CHECK(
++            false,
++            "TorchScript backend is disabled in this WebAssembly build");
++        return std::make_pair(
++            std::vector<int64_t>(), std::vector<at::IValue>());
+ #else
+         TORCH_CHECK(
+             false, "TorchScript backend not yet supported in FBCODE builds");
+@@ -280,7 +294,8 @@ void initLazyBindings(PyObject* module) {
+       [](const std::string& hash_str,
+          const std::vector<at::IValue>& graph_inputs) {
+         std::vector<at::Tensor> result;
+-#if !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
++#if !defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND) && \
++    !(defined(FBCODE_CAFFE2) || defined(OVRSOURCE))
+         TORCH_CHECK(hash_str.size() == sizeof(hash_t));
+         hash_t hash = *(hash_t*)(hash_str.c_str());
+         auto cachedComputation =
+@@ -301,6 +316,10 @@ void initLazyBindings(PyObject* module) {
+         for (torch::jit::IValue elem : stack) {
+           result.push_back(elem.toTensor());
+         }
++#elif defined(PYTORCH_WASM_NO_LAZY_TS_BACKEND)
++        TORCH_CHECK(
++            false,
++            "TorchScript backend is disabled in this WebAssembly build");
+ #else
+         TORCH_CHECK(
+             false, "TorchScript backend not yet supported in FBCODE builds");
+-- 
+2.51.1

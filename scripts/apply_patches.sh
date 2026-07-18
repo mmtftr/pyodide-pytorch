@@ -22,9 +22,21 @@ if [[ "${#patches[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+temporary_directory="$(mktemp -d)"
+temporary_index="$temporary_directory/index"
+cleanup() {
+  rm -f "$temporary_index" "$temporary_index.lock"
+  rmdir "$temporary_directory"
+}
+trap cleanup EXIT
+
+GIT_INDEX_FILE="$temporary_index" git -C "$source_dir" read-tree HEAD
 for patch in "${patches[@]}"; do
   echo "Checking $(basename "$patch")"
-  git -C "$source_dir" apply --check "$patch"
+  GIT_INDEX_FILE="$temporary_index" \
+    git -C "$source_dir" apply --cached --check "$patch"
+  GIT_INDEX_FILE="$temporary_index" \
+    git -C "$source_dir" apply --cached "$patch"
 done
 
 for patch in "${patches[@]}"; do

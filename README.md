@@ -21,7 +21,8 @@ WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
 - Deterministic post-processing that removes headers, static archives, command
   line tools, and other build-only payloads.
 - Binary validation of the wheel tag, RECORD hashes, WebAssembly magic,
-  target features, and non-shared memory.
+  target features, non-shared memory, dynamic dependencies, and unresolved
+  PyTorch-owned symbols.
 - A real Pyodide/Node smoke test covering tensor operations, autograd,
   `torch.nn`, an optimizer step, serialization, and `torch.func`.
 - Release SHA-256 files, a machine-readable input manifest, and GitHub artifact
@@ -49,6 +50,9 @@ patch set therefore makes the constraint explicit:
 Some libc and C++ standard-library pthread symbol names can remain in dead or
 stubbed code. The meaningful Wasm invariant is that the module neither imports
 shared memory nor opts into atomics, and no runtime path creates a worker.
+Filesystem-backed multiprocessing storage is explicitly unsupported: its
+fork/socket manager is omitted, while unrelated storage weak-reference APIs
+remain available.
 
 ## Use a release wheel
 
@@ -107,7 +111,8 @@ The pipeline performs these steps:
 6. Prunes build-time payloads and rewrites wheel RECORD hashes
    deterministically.
 7. Rejects an ABI mismatch, native/non-Wasm `.so`, static archive, shared
-   memory, atomics feature, missing dependency, or oversized wheel.
+   memory, atomics feature, missing dependency, unresolved project symbol, or
+   oversized wheel.
 8. Imports the wheel in the pinned Pyodide runtime and runs the smoke suite.
 
 Fast local repository checks do not require a PyTorch checkout:

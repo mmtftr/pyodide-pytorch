@@ -1,25 +1,23 @@
-From 8d59cd78297534cdb6e32bd5bfd6bfeb3d9e17ac Mon Sep 17 00:00:00 2001
+From ed237c43a29b7769d50fac8e2aad37bbc11160e4 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Thu, 17 Jul 2026 00:00:02 +0300
+Date: Fri, 17 Jul 2026 00:00:02 +0300
 Subject: [PATCH 3/5] Use a host protoc when cross-compiling
 
 The target protoc is a WebAssembly program and cannot be executed during the
 build. Require the workflow to provide the matching, natively compiled protoc
 from PyTorch's pinned protobuf submodule.
 ---
- CMakeLists.txt | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+ CMakeLists.txt | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 1941ef1..e57cfc0 100644
+index 8f77efa..3498c4b 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -705,6 +705,20 @@ if(NOT IOS AND CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES M
-   set(CAFFE2_CUSTOM_PROTOC_EXECUTABLE "${PROJECT_SOURCE_DIR}/build_host_protoc/bin/protoc")
- endif()
+@@ -707,6 +707,16 @@ endif()
  
-+if(EMSCRIPTEN)
-+  add_compile_definitions(PYTORCH_WASM_NO_THREADS=1)
+ if(EMSCRIPTEN)
+   add_compile_definitions(PYTORCH_WASM_NO_THREADS=1)
 +  if(NOT DEFINED ENV{PYTORCH_HOST_PROTOC} OR
 +     NOT EXISTS "$ENV{PYTORCH_HOST_PROTOC}")
 +    message(FATAL_ERROR
@@ -30,10 +28,9 @@ index 1941ef1..e57cfc0 100644
 +      CACHE FILEPATH "Host protoc for WebAssembly cross-compilation" FORCE)
 +  set(CAFFE2_CUSTOM_PROTOC_EXECUTABLE "$ENV{PYTORCH_HOST_PROTOC}"
 +      CACHE FILEPATH "Host protoc for WebAssembly cross-compilation" FORCE)
-+endif()
-+
- # ---[ Misc checks to cope with various compiler modes
- include(cmake/MiscCheck.cmake)
+ endif()
  
+ # ---[ Misc checks to cope with various compiler modes
 -- 
-2.47.2
+2.51.1
+

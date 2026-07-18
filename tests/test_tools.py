@@ -55,6 +55,31 @@ def wasm_with_dynamic_libraries(*libraries: str) -> bytes:
     return b"\0asm\x01\0\0\0" + b"\x00" + uleb(len(payload)) + payload
 
 
+def wasm_with_function_imports(
+    *names: str, exported: tuple[str, ...] = ()
+) -> bytes:
+    def string(value: str) -> bytes:
+        encoded = value.encode()
+        return uleb(len(encoded)) + encoded
+
+    entries = b"".join(
+        string("env") + string(name) + b"\x00" + uleb(0) for name in names
+    )
+    import_payload = uleb(len(names)) + entries
+    module = (
+        b"\0asm\x01\0\0\0"
+        + b"\x02"
+        + uleb(len(import_payload))
+        + import_payload
+    )
+    if exported:
+        export_payload = uleb(len(exported)) + b"".join(
+            string(name) + b"\x00" + uleb(0) for name in exported
+        )
+        module += b"\x07" + uleb(len(export_payload)) + export_payload
+    return module
+
+
 class ToolTests(unittest.TestCase):
     def test_manifest_is_valid(self) -> None:
         self.assertEqual(config.validate(config.load()), [])
@@ -83,6 +108,22 @@ class ToolTests(unittest.TestCase):
                 wasm_with_imported_memory(shared=False)
             ),
             [],
+        )
+
+    def test_unresolved_project_symbol_detection(self) -> None:
+        data = wasm_with_function_imports(
+            "invoke_vii",
+            "cpuinfo_emscripten_init",
+            "_ZN10onnx_torch9TypeProto11clear_valueEv",
+            "_ZN3c1016already_resolvedEv",
+            exported=("_ZN3c1016already_resolvedEv",),
+        )
+        self.assertEqual(
+            validate_wheel.wasm_unresolved_project_symbols(data),
+            [
+                "_ZN10onnx_torch9TypeProto11clear_valueEv",
+                "cpuinfo_emscripten_init",
+            ],
         )
 
     def test_pyodide_toolchain_repair_is_idempotent(self) -> None:

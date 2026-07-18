@@ -1,6 +1,6 @@
-From 20b8a15cf65fd390f6402a038cab78115a576953 Mon Sep 17 00:00:00 2001
+From 3a6183eed3344fb7918452a71aa3ea176f3c971b Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Thu, 17 Jul 2026 00:00:04 +0300
+Date: Fri, 17 Jul 2026 00:00:04 +0300
 Subject: [PATCH 5/5] Scope Clang getter cast diagnostic on Emscripten
 
 PyTorch enables -Werror=cast-function-type for C++ builds. Clang's strict
@@ -14,13 +14,10 @@ compiler command.
  1 file changed, 6 insertions(+)
 
 diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
+index 5e72703..bcd1ea3 100644
 --- a/torch/CMakeLists.txt
 +++ b/torch/CMakeLists.txt
-@@ -317,8 +317,14 @@ if(USE_PRECOMPILED_HEADERS)
-       "$<$<COMPILE_LANGUAGE:CXX>:ATen/ATen.h>")
- endif()
- 
- if(NOT MSVC)
+@@ -334,6 +334,12 @@ if(NOT MSVC)
    target_compile_options(torch_python PRIVATE -Wno-unused-variable)
  endif()
  
@@ -31,5 +28,8 @@ diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
 +endif()
 +
  # Required workaround for generated sources
+ # See https://samthursfield.wordpress.com/2015/11/21/cmake-dependencies-between-targets-and-files-and-custom-commands/#custom-commands-in-different-directories
+ add_dependencies(torch_python generate-torch-sources)
 -- 
-2.47.2
+2.51.1
+

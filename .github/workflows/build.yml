@@ -161,12 +161,14 @@ jobs:
             "$PYTORCH_VERSION" \
             "$PYTORCH_REF"
 
-      - name: Upload unverified wheel after smoke failure
-        if: ${{ failure() && steps.wheel.outcome == 'success' }}
+      - name: Upload unverified wheel after validation or smoke failure
+        if: ${{ failure() && steps.wheel.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: unverified-torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
-          path: wheelhouse/dist/*
+          path: |
+            wheelhouse/raw/*
+            wheelhouse/dist/*
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -36,6 +36,15 @@ REQUIRED_DEPENDENCIES = {
     "sympy",
     "typing-extensions",
 }
+PROJECT_IMPORT_PREFIXES = (
+    "_ZN2at",
+    "_ZN3c10",
+    "_ZN5torch",
+    "_ZN6caffe2",
+    "_ZN10onnx_torch",
+    "_ZN21THManagedMapAllocator",
+    "cpuinfo_",
+)
 
 
 class WasmFormatError(ValueError):
@@ -152,6 +161,72 @@ def wasm_dynamic_libraries(data: bytes) -> list[str]:
     return libraries
 
 
+def wasm_imports(data: bytes) -> list[tuple[str, str, int]]:
+    """Return (module, name, kind) entries from the Wasm import section."""
+    if not data.startswith(b"\0asm\x01\0\0\0"):
+        raise WasmFormatError("invalid WebAssembly magic or version")
+    module = Reader(data, 8)
+    imports: list[tuple[str, str, int]] = []
+    while module.position < len(module.data):
+        section_id = module.byte()
+        payload = Reader(module.take(module.uleb()))
+        if section_id != 2:
+            continue
+        for _ in range(payload.uleb()):
+            imported_module = payload.string()
+            name = payload.string()
+            kind = payload.byte()
+            imports.append((imported_module, name, kind))
+            if kind == 0:
+                payload.uleb()
+            elif kind == 1:
+                payload.byte()
+                read_limits(payload)
+            elif kind == 2:
+                read_limits(payload)
+            elif kind == 3:
+                payload.byte()
+                payload.byte()
+            elif kind == 4:
+                payload.byte()
+                payload.uleb()
+            else:
+                raise WasmFormatError(f"unknown import kind {kind}")
+    return imports
+
+
+def wasm_exports(data: bytes) -> dict[str, int]:
+    """Return exported symbol names and their external kinds."""
+    if not data.startswith(b"\0asm\x01\0\0\0"):
+        raise WasmFormatError("invalid WebAssembly magic or version")
+    module = Reader(data, 8)
+    exports: dict[str, int] = {}
+    while module.position < len(module.data):
+        section_id = module.byte()
+        payload = Reader(module.take(module.uleb()))
+        if section_id != 7:
+            continue
+        for _ in range(payload.uleb()):
+            name = payload.string()
+            kind = payload.byte()
+            payload.uleb()
+            exports[name] = kind
+    return exports
+
+
+def wasm_unresolved_project_symbols(data: bytes) -> list[str]:
+    """Find known project-namespace imports that torch._C does not export."""
+    exports = wasm_exports(data)
+    return sorted(
+        {
+            name
+            for _, name, _ in wasm_imports(data)
+            if name.startswith(PROJECT_IMPORT_PREFIXES)
+            and name not in exports
+        }
+    )
+
+
 def urlsafe_digest(data: bytes) -> str:
     value = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
     return "sha256=" + value.decode("ascii")
@@ -256,6 +331,12 @@ def validate(path: Path) -> dict[str, object]:
                 "torch._C is not self-contained; dynamic libraries: "
                 + ", ".join(dynamic_libraries)
             )
+        unresolved_project_symbols = wasm_unresolved_project_symbols(extension_data)
+        if unresolved_project_symbols:
+            raise ValueError(
+                "torch._C has unresolved project symbols: "
+                + ", ".join(unresolved_project_symbols)
+            )
 
         validate_record(wheel, record_path)
 
@@ -265,6 +346,7 @@ def validate(path: Path) -> dict[str, object]:
         "tag": expected_tag,
         "extensions": extensions,
         "dynamic_libraries": dynamic_libraries,
+        "unresolved_project_symbols": unresolved_project_symbols,
         "threading": "single",
         "shared_memory": False,
     }

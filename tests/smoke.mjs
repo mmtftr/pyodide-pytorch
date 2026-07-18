@@ -3,39 +3,83 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 const require = createRequire(import.meta.url);
-const { loadPyodide } = require("pyodide");
+const MAX_ERROR_CHARACTERS = 4_000;
 
-const [wheelArgument, expectedVersion, expectedCommit] = process.argv.slice(2);
-if (!wheelArgument || !expectedVersion || !expectedCommit) {
-  throw new Error(
-    "usage: node tests/smoke.mjs WHEEL EXPECTED_VERSION EXPECTED_COMMIT",
+let currentStage = "argument validation";
+let wheel;
+let wheelBytes;
+
+function errorDetail(error) {
+  const detail =
+    error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error);
+  if (detail.length <= MAX_ERROR_CHARACTERS) {
+    return detail;
+  }
+  return `${detail.slice(0, MAX_ERROR_CHARACTERS)}… [truncated]`;
+}
+
+async function runStage(name, operation) {
+  currentStage = name;
+  const started = Date.now();
+  console.log(`smoke: ${name}`);
+  const result = await operation();
+  console.log(`smoke: ${name} passed in ${Date.now() - started} ms`);
+  return result;
+}
+
+async function main() {
+  const [wheelArgument, expectedVersion, expectedCommit] = process.argv.slice(2);
+  if (!wheelArgument || !expectedVersion || !expectedCommit) {
+    throw new Error(
+      "usage: node tests/smoke.mjs WHEEL EXPECTED_VERSION EXPECTED_COMMIT",
+    );
+  }
+
+  wheel = path.resolve(wheelArgument);
+  if (!fs.existsSync(wheel)) {
+    throw new Error(`wheel does not exist: ${wheel}`);
+  }
+  wheelBytes = fs.statSync(wheel).size;
+  console.log(
+    JSON.stringify({
+      smoke: "environment",
+      node: process.version,
+      wheel,
+      wheel_bytes: wheelBytes,
+    }),
   );
-}
 
-const wheel = path.resolve(wheelArgument);
-if (!fs.existsSync(wheel)) {
-  throw new Error(`wheel does not exist: ${wheel}`);
-}
+  const { loadPyodide } = await runStage(
+    "load Pyodide JavaScript package",
+    async () => require("pyodide"),
+  );
+  const pyodide = await runStage("initialize Pyodide", () => loadPyodide());
 
-const pyodide = await loadPyodide();
-await pyodide.loadPackage([
-  "micropip",
-  "numpy",
-  "typing-extensions",
-  "sympy",
-  "networkx",
-  "jinja2",
-  "fsspec",
-]);
-await pyodide.runPythonAsync(`
+  await runStage("load runtime dependencies", () =>
+    pyodide.loadPackage([
+      "micropip",
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]),
+  );
+  await runStage("install filelock", () =>
+    pyodide.runPythonAsync(`
 import micropip
 await micropip.install("filelock")
-`);
-await pyodide.loadPackage(wheel);
+`),
+  );
+  await runStage("load torch wheel", () => pyodide.loadPackage(wheel));
 
-pyodide.globals.set("EXPECTED_TORCH_VERSION", expectedVersion);
-pyodide.globals.set("EXPECTED_TORCH_COMMIT", expectedCommit);
-const result = await pyodide.runPythonAsync(`
+  pyodide.globals.set("EXPECTED_TORCH_VERSION", expectedVersion);
+  pyodide.globals.set("EXPECTED_TORCH_COMMIT", expectedCommit);
+  const result = await runStage("run torch assertions", () =>
+    pyodide.runPythonAsync(`
 import io
 import json
 import sys
@@ -104,6 +148,27 @@ json.dumps({
     "serialization": True,
     "torch_func": True,
 })
-`);
+`),
+  );
 
-console.log(JSON.stringify(JSON.parse(result), null, 2));
+  console.log(JSON.stringify(JSON.parse(result), null, 2));
+}
+
+main().catch((error) => {
+  console.error(
+    JSON.stringify(
+      {
+        smoke: "failed",
+        stage: currentStage,
+        node: process.version,
+        wheel,
+        wheel_bytes: wheelBytes,
+        rss_bytes: process.memoryUsage().rss,
+        error: errorDetail(error),
+      },
+      null,
+      2,
+    ),
+  );
+  process.exitCode = 1;
+});
