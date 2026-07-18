@@ -84,6 +84,24 @@ class ToolTests(unittest.TestCase):
     def test_manifest_is_valid(self) -> None:
         self.assertEqual(config.validate(config.load()), [])
 
+    def test_release_tag_uses_pinned_pyodide_version(self) -> None:
+        manifest = config.load()
+        manifest["release"]["tag"] = (
+            "torch-prefix-pyodide-0.24.1-decoy-pyodide-9.9.9-r1"
+        )
+        self.assertIn(
+            "release.tag must contain the pinned Pyodide version",
+            config.validate(manifest),
+        )
+
+    def test_release_tag_rejects_invalid_git_ref_components(self) -> None:
+        manifest = config.load()
+        manifest["release"]["tag"] = "torch-a..b-pyodide-0.24.1-r1"
+        self.assertIn(
+            "release.tag must match torch-*-pyodide-X.Y.Z[-rN]",
+            config.validate(manifest),
+        )
+
     def test_shared_memory_detection(self) -> None:
         self.assertFalse(
             validate_wheel.wasm_uses_shared_memory(

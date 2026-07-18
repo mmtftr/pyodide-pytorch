@@ -25,6 +25,7 @@ ENV_KEYS = {
     "PYTHON_VERSION": ("pyodide", "python_version"),
     "PYTHON_TAG": ("pyodide", "python_tag"),
     "EMSCRIPTEN_VERSION": ("pyodide", "emscripten_version"),
+    "RELEASE_TAG": ("release", "tag"),
     "MAX_JOBS": ("build", "max_jobs"),
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
     "WHEEL_VERSION": ("host_tools", "wheel_version"),
@@ -56,6 +57,7 @@ def validate(config: dict[str, Any]) -> list[str]:
         python_version = str(lookup(config, ("pyodide", "python_version")))
         python_tag = str(lookup(config, ("pyodide", "python_tag")))
         emscripten = str(lookup(config, ("pyodide", "emscripten_version")))
+        release_tag = str(lookup(config, ("release", "tag")))
         max_jobs = int(lookup(config, ("build", "max_jobs")))
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
         wheel_version = str(lookup(config, ("host_tools", "wheel_version")))
@@ -81,6 +83,15 @@ def validate(config: dict[str, Any]) -> list[str]:
             errors.append(f"python_tag must be {expected_tag} for {python_version}")
     if not re.fullmatch(r"\d+\.\d+\.\d+", emscripten):
         errors.append("pyodide.emscripten_version must be a three-part version")
+    release_match = re.fullmatch(
+        r"torch-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*-pyodide-"
+        r"(?P<pyodide>\d+\.\d+\.\d+)(?:-r[1-9]\d*)?",
+        release_tag,
+    )
+    if release_match is None:
+        errors.append("release.tag must match torch-*-pyodide-X.Y.Z[-rN]")
+    elif release_match.group("pyodide") != pyodide_version:
+        errors.append("release.tag must contain the pinned Pyodide version")
     if not 1 <= max_jobs <= 16:
         errors.append("build.max_jobs must be between 1 and 16")
     if not 20 <= max_wheel <= 500:

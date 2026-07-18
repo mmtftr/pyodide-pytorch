@@ -1,0 +1,53 @@
+From 4d8896cc82e19486fdd1f1a56601d41f26382b33 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Fri, 17 Jul 2026 00:00:05 +0300
+Subject: [PATCH 6/6] Handle thread setter errors at the Python boundary
+
+Backport the binding fix from PyTorch 78f3937ee84e. These Python C API entry
+points lacked PyTorch's standard exception boundary, allowing an ATen
+TORCH_CHECK to escape and abort Pyodide instead of becoming RuntimeError.
+
+Upstream: https://github.com/pytorch/pytorch/commit/78f3937ee84e71475942598f4b51dce7c8a70783
+---
+ torch/csrc/Module.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/torch/csrc/Module.cpp b/torch/csrc/Module.cpp
+index de718a8..883df20 100644
+--- a/torch/csrc/Module.cpp
++++ b/torch/csrc/Module.cpp
+@@ -244,6 +244,7 @@ static PyObject* THPModule_getNumThreads(PyObject* module, PyObject* noargs) {
+ }
+ 
+ static PyObject* THPModule_setNumThreads(PyObject* module, PyObject* arg) {
++  HANDLE_TH_ERRORS
+   THPUtils_assert(
+       THPUtils_checkLong(arg),
+       "set_num_threads expects an int, "
+@@ -253,6 +254,7 @@ static PyObject* THPModule_setNumThreads(PyObject* module, PyObject* arg) {
+   THPUtils_assert(nthreads > 0, "set_num_threads expects a positive integer");
+   at::set_num_threads(nthreads);
+   Py_RETURN_NONE;
++  END_HANDLE_TH_ERRORS
+ }
+ 
+ static PyObject* THPModule_getNumInteropThreads(
+@@ -264,6 +266,7 @@ static PyObject* THPModule_getNumInteropThreads(
+ static PyObject* THPModule_setNumInteropThreads(
+     PyObject* module,
+     PyObject* arg) {
++  HANDLE_TH_ERRORS
+   THPUtils_assert(
+       THPUtils_checkLong(arg),
+       "set_num_interop_threads expects an int, "
+@@ -274,6 +277,7 @@ static PyObject* THPModule_setNumInteropThreads(
+       nthreads > 0, "set_num_interop_threads expects a positive integer");
+   at::set_num_interop_threads(nthreads);
+   Py_RETURN_NONE;
++  END_HANDLE_TH_ERRORS
+ }
+ 
+ PyObject* THPModule_setDefaultTensorType(PyObject* _unused, PyObject* type) {
+-- 
+2.51.1
+

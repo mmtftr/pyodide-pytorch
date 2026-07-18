@@ -97,8 +97,12 @@ the distribution channel.
 
 The GitHub Actions workflow is the canonical build environment. Run **Build
 PyTorch wheel** with `workflow_dispatch`, or push a change to an ABI-relevant
-path on `main`. A release tag matching `torch-*-pyodide-*` builds, tests,
-attests, and publishes the assets.
+path on `main`. The accepted release name is pinned in `config/build.toml`; a
+matching tag builds, tests, attests, and publishes the assets. Automation that
+cannot create tags may instead create `release/<release-tag>` directly at the
+current `main` commit. After the same build and tests pass, the workflow creates
+the corresponding tag and release. This branch trigger is one-shot: updating
+an existing release branch never republishes it.
 
 The pipeline performs these steps:
 

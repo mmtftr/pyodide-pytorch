@@ -1,7 +1,7 @@
 From 3a6183eed3344fb7918452a71aa3ea176f3c971b Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Fri, 17 Jul 2026 00:00:04 +0300
-Subject: [PATCH 5/5] Scope Clang getter cast diagnostic on Emscripten
+Subject: [PATCH 5/6] Scope Clang getter cast diagnostic on Emscripten
 
 PyTorch enables -Werror=cast-function-type for C++ builds. Clang's strict
 subgroup diagnoses the generated CPython PyGetSetDef adapters, whose typed
@@ -32,4 +32,3 @@ index 5e72703..bcd1ea3 100644
  add_dependencies(torch_python generate-torch-sources)
 -- 
 2.51.1
-
