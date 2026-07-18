@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import config  # noqa: E402
 import postprocess_wheel  # noqa: E402
 import repair_pyodide_build  # noqa: E402
+import verify_release_artifact  # noqa: E402
 import validate_wheel  # noqa: E402
 
 
@@ -152,6 +155,43 @@ class ToolTests(unittest.TestCase):
             destination.write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "does not match"):
                 repair_pyodide_build.install_toolchain(destination)
+
+    def test_release_artifact_verification_binds_inputs_and_commit(self) -> None:
+        builder_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheel = root / "torch-test.whl"
+            wheel.write_bytes(b"tested wheel")
+            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            (root / f"{wheel.name}.sha256").write_text(
+                f"{digest}  {wheel.name}\n", encoding="utf-8"
+            )
+            manifest = {
+                "schema_version": 1,
+                "builder_repository_commit": builder_commit,
+                "configuration": config.load(),
+                "inputs": verify_release_artifact.expected_inputs(),
+                "wheel": {
+                    "filename": wheel.name,
+                    "sha256": digest,
+                    "size": wheel.stat().st_size,
+                },
+            }
+            (root / "build-manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            verified_wheel, errors = verify_release_artifact.verify(
+                root, builder_commit
+            )
+            self.assertEqual(verified_wheel, wheel)
+            self.assertEqual(errors, [])
+
+            _, errors = verify_release_artifact.verify(root, "b" * 40)
+            self.assertIn(
+                "build manifest commit does not match the source workflow run",
+                errors,
+            )
 
     def test_postprocess_prunes_and_produces_a_valid_wheel(self) -> None:
         values = config.flat_env(config.load())

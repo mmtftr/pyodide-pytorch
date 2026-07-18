@@ -1,0 +1,198 @@
+name: Publish verified release artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Build workflow run containing the verified wheel artifact
+        required: true
+        type: string
+  create:
+
+concurrency:
+  group: publish-pytorch-pyodide-release
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.ref_type == 'branch' &&
+        startsWith(github.event.ref, 'publish/')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out release repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read pinned configuration
+        id: config
+        run: |
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+          python3 scripts/config.py env >> "$GITHUB_ENV"
+
+      - name: Verify source workflow run
+        id: source
+        env:
+          CREATED_REF: ${{ github.event.ref }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ inputs.run_id }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
+            if [[ "$CREATED_REF" =~ ^publish/([1-9][0-9]*)$ ]]; then
+              source_run_id="${BASH_REMATCH[1]}"
+            else
+              echo "::error::Recovery branches must be named publish/<run-id>"
+              exit 1
+            fi
+            git fetch --no-tags origin main
+            main_sha="$(git rev-parse origin/main)"
+            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+              echo "::error::Recovery branches must point at current main $main_sha"
+              exit 1
+            fi
+          else
+            source_run_id="$REQUESTED_RUN_ID"
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::Manual recovery must run from main"
+              exit 1
+            fi
+          fi
+          if [[ ! "$source_run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The source workflow run ID is invalid"
+            exit 1
+          fi
+
+          mapfile -t run_fields < <(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run_id" \
+              --jq '[.event, .head_branch, .head_sha, .head_repository.full_name, .path] | .[]'
+          )
+          if [[ "${#run_fields[@]}" -ne 5 ]]; then
+            echo "::error::Could not read the source workflow metadata"
+            exit 1
+          fi
+          source_event="${run_fields[0]}"
+          source_branch="${run_fields[1]}"
+          source_sha="${run_fields[2]}"
+          source_repository="${run_fields[3]}"
+          source_workflow="${run_fields[4]}"
+          if [[ "$source_event" != "create" || \
+                "$source_branch" != "release/$RELEASE_TAG" || \
+                "$source_repository" != "$GITHUB_REPOSITORY" || \
+                "$source_workflow" != ".github/workflows/build.yml" || \
+                ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The source run is not the pinned release build"
+            exit 1
+          fi
+
+          jobs_json="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run_id/jobs?filter=latest&per_page=100"
+          )"
+          required_steps=(
+            "Verify release request"
+            "Apply ordered patches"
+            "Build raw WebAssembly wheel"
+            "Prune and validate wheel"
+            "Test inside pinned Pyodide"
+            "Upload wheel and provenance"
+          )
+          for step_name in "${required_steps[@]}"; do
+            conclusion="$(
+              jq -r --arg step "$step_name" \
+                '[.jobs[] | select(.name == "build") | .steps[] | select(.name == $step) | .conclusion] | unique | if length == 1 then .[0] else "invalid" end' \
+                <<< "$jobs_json"
+            )"
+            if [[ "$conclusion" != "success" ]]; then
+              echo "::error::Required source step '$step_name' concluded '$conclusion'"
+              exit 1
+            fi
+          done
+
+          git fetch --no-tags origin main "$source_sha"
+          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+            echo "::error::Source commit $source_sha is not an ancestor of main"
+            exit 1
+          fi
+          echo "run_id=$source_run_id" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Download verified wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
+          path: wheelhouse/dist
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+
+      - name: Revalidate downloaded artifact
+        id: wheel
+        env:
+          BUILDER_COMMIT: ${{ steps.source.outputs.head_sha }}
+        run: |
+          python3 scripts/verify_release_artifact.py \
+            wheelhouse/dist \
+            --builder-commit "$BUILDER_COMMIT"
+          mapfile -t wheels < <(find wheelhouse/dist -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          python3 scripts/validate_wheel.py "${wheels[0]}"
+          echo "path=${wheels[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Retest inside pinned Pyodide
+        run: |
+          npm install --no-save "pyodide@$PYODIDE_VERSION"
+          node tests/smoke.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "$PYTORCH_VERSION" \
+            "$PYTORCH_REF"
+
+      - name: Attest wheel provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            wheelhouse/dist/*.whl
+            wheelhouse/dist/*.sha256
+            wheelhouse/dist/build-manifest.json
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          tag_ref="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '.object.type + " " + .object.sha' 2>/dev/null || true
+          )"
+          if [[ -z "$tag_ref" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" \
+              -f sha="$SOURCE_SHA" >/dev/null
+          elif [[ "$tag_ref" != "commit $SOURCE_SHA" ]]; then
+            echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists; refusing to replace assets"
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --generate-notes \
+            --title "$RELEASE_TAG" \
+            wheelhouse/dist/*

@@ -25,8 +25,9 @@ WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
   PyTorch-owned symbols.
 - A real Pyodide/Node smoke test covering tensor operations, autograd,
   `torch.nn`, an optimizer step, serialization, and `torch.func`.
-- Release SHA-256 files, a machine-readable input manifest, and GitHub artifact
-  attestations. Generated wheels are release assets, never Git objects.
+- Release SHA-256 files and a machine-readable input manifest. Public
+  repositories also receive GitHub artifact attestations. Generated wheels are
+  release assets, never Git objects.
 
 The earlier wheel shared in
 [`mat3ra/api-examples#286`](https://github.com/mat3ra/api-examples/pull/286)
@@ -98,11 +99,21 @@ the distribution channel.
 The GitHub Actions workflow is the canonical build environment. Run **Build
 PyTorch wheel** with `workflow_dispatch`, or push a change to an ABI-relevant
 path on `main`. The accepted release name is pinned in `config/build.toml`; a
-matching tag builds, tests, attests, and publishes the assets. Automation that
-cannot create tags may instead create `release/<release-tag>` directly at the
-current `main` commit. After the same build and tests pass, the workflow creates
-the corresponding tag and release. This branch trigger is one-shot: updating
-an existing release branch never republishes it.
+matching tag builds, tests, attests when supported, and publishes the assets.
+Automation that cannot create tags may instead create `release/<release-tag>`
+directly at the current `main` commit. After the same build and tests pass, the
+workflow creates the corresponding tag and release. This branch trigger is
+one-shot: updating an existing release branch never republishes it.
+
+GitHub does not support artifact attestations for user-owned private
+repositories. In that case the attestation step is skipped; checksum, binary,
+and runtime validation still gate publication. If a release build uploads a
+verified artifact but a later publication step fails, run **Publish verified
+release artifact** with the source run ID. Automation without workflow-dispatch
+access may create `publish/<run-id>` at current `main`. The recovery workflow
+checks the source run and every critical build step, revalidates the artifact
+and manifest against the current pins, reruns the Pyodide smoke test, and
+refuses to overwrite an existing release.
 
 The pipeline performs these steps:
 
