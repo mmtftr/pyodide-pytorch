@@ -19,7 +19,7 @@ diff --git a/setup.py b/setup.py
 index 55f333e..81831dd 100644
 --- a/setup.py
 +++ b/setup.py
-@@ -939,4 +939,40 @@ def configure_extension_build():
+@@ -939,8 +939,44 @@ def configure_extension_build():
      main_compile_args = []
      main_libraries = ["torch_python"]
      main_link_args = []
@@ -60,6 +60,10 @@ index 55f333e..81831dd 100644
 +            + support_archives
 +            + ["-Wl,--end-group"]
 +        )
+ 
+     if cmake_cache_vars["USE_CUDA"]:
+         library_dirs.append(os.path.dirname(cmake_cache_vars["CUDA_CUDA_LIB"]))
+ 
 diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
 index e5990f3..2589047 100644
 --- a/torch/CMakeLists.txt
