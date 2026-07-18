@@ -181,10 +181,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
         run: |
-          tag_ref="$(
+          if tag_ref="$(
             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '.object.type + " " + .object.sha' 2>/dev/null || true
-          )"
+              --jq '.object.type + " " + .object.sha' 2>/dev/null
+          )"; then
+            :
+          else
+            tag_ref=""
+          fi
           if [[ -z "$tag_ref" ]]; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$RELEASE_TAG" \
