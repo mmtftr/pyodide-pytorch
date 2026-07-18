@@ -163,7 +163,7 @@ jobs:
 
       - name: Attest wheel provenance
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             wheelhouse/dist/*.whl
