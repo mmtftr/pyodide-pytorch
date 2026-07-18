@@ -18,6 +18,7 @@ permissions:
   attestations: write
   contents: write
   id-token: write
+  statuses: write
 
 jobs:
   publish:
@@ -35,6 +36,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Publish pending release status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/release pending
+
       - name: Read pinned configuration
         id: config
         run: |
@@ -50,10 +56,10 @@ jobs:
           REQUESTED_RUN_ID: ${{ inputs.run_id }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            if [[ "$CREATED_REF" =~ ^publish/([1-9][0-9]*)$ ]]; then
+            if [[ "$CREATED_REF" =~ ^publish/([1-9][0-9]*)(/retry-[1-9][0-9]*)?$ ]]; then
               source_run_id="${BASH_REMATCH[1]}"
             else
-              echo "::error::Recovery branches must be named publish/<run-id>"
+              echo "::error::Recovery branches must be named publish/<run-id>[/retry-<number>]"
               exit 1
             fi
             git fetch --no-tags origin main
@@ -196,3 +202,9 @@ jobs:
             --generate-notes \
             --title "$RELEASE_TAG" \
             wheelhouse/dist/*
+
+      - name: Publish final release status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/publish_status.sh pytorch-pyodide/release "${{ job.status }}"

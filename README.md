@@ -113,7 +113,9 @@ release artifact** with the source run ID. Automation without workflow-dispatch
 access may create `publish/<run-id>` at current `main`. The recovery workflow
 checks the source run and every critical build step, revalidates the artifact
 and manifest against the current pins, reruns the Pyodide smoke test, and
-refuses to overwrite an existing release.
+refuses to overwrite an existing release. A retry can use
+`publish/<run-id>/retry-<number>`; each run reports its URL through the
+`pytorch-pyodide/release` commit status.
 
 The pipeline performs these steps:
 
