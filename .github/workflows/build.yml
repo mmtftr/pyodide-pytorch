@@ -137,7 +137,7 @@ jobs:
           key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
 
       - name: Set up pinned Emscripten
-        uses: mymindstorm/setup-emsdk@v14
+        uses: mymindstorm/setup-emsdk@v16
         with:
           version: ${{ steps.config.outputs.emscripten_version }}
           actions-cache-folder: emsdk-cache
