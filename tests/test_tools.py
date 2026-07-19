@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +156,44 @@ class ToolTests(unittest.TestCase):
             destination.write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "does not match"):
                 repair_pyodide_build.install_toolchain(destination)
+
+    def test_pyodide_cmake_command_mode_repair_is_idempotent(self) -> None:
+        source = (
+            '    elif cmd == "cmake":\n'
+            f"{repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL}\n"
+            "            return line\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "pywasmcross.py"
+            destination.write_text(source, encoding="utf-8")
+            original_digest = repair_pyodide_build.digest(destination)
+            fixed_source = source.replace(
+                repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL,
+                repair_pyodide_build.CMAKE_COMMAND_MODE_FIXED,
+            )
+            fixed_digest = hashlib.sha256(fixed_source.encode()).hexdigest()
+            with mock.patch.multiple(
+                repair_pyodide_build,
+                PYWASMCROSS_EXPECTED_SHA256=original_digest,
+                PYWASMCROSS_FIXED_SHA256=fixed_digest,
+            ):
+                self.assertTrue(
+                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
+                )
+                self.assertFalse(
+                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
+                )
+                repaired = destination.read_text(encoding="utf-8")
+                self.assertIn(
+                    repair_pyodide_build.CMAKE_COMMAND_MODE_FIXED, repaired
+                )
+                self.assertNotIn(
+                    repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL, repaired
+                )
+
+                destination.write_text("unexpected", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "has SHA-256"):
+                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
 
     def test_release_artifact_verification_binds_inputs_and_commit(self) -> None:
         builder_commit = "a" * 40

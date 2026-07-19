@@ -100,6 +100,31 @@ jobs:
             "ninja==${NINJA_VERSION}" \
             "cmake==${CMAKE_VERSION}"
           python scripts/repair_pyodide_build.py
+          python - <<'PY'
+          from pyodide_build.pywasmcross import BuildArgs, handle_command_generate_args
+
+          probe = ["cmake", "-E", "capabilities"]
+          actual_probe = handle_command_generate_args(probe.copy(), BuildArgs(), False)
+          if actual_probe != probe:
+              raise RuntimeError(f"CMake command mode was cross-wrapped: {actual_probe}")
+
+          configure = ["cmake", "-S", ".", "-B", "build"]
+          actual_configure = handle_command_generate_args(
+              configure.copy(), BuildArgs(), False
+          )
+          if actual_configure[:2] != ["emcmake", "cmake"]:
+              raise RuntimeError(f"CMake configure bypassed emcmake: {actual_configure}")
+          if "--fresh" not in actual_configure:
+              raise RuntimeError(f"CMake configure omitted --fresh: {actual_configure}")
+          compiler_flags = ("-DCMAKE_C_COMPILER=", "-DCMAKE_CXX_COMPILER=")
+          if any(
+              not any(argument.startswith(prefix) for argument in actual_configure)
+              for prefix in compiler_flags
+          ):
+              raise RuntimeError(
+                  f"CMake configure omitted compiler wrappers: {actual_configure}"
+              )
+          PY
           sudo apt-get update
           sudo apt-get install --yes ccache
           pyodide config get emscripten_version
