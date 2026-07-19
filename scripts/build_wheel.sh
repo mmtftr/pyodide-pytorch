@@ -85,9 +85,6 @@ export USE_XNNPACK=0
 export USE_ZMQ=0
 export USE_ZSTD=0
 
-export CXXFLAGS="${CXXFLAGS:-} -fexceptions"
-export LDFLAGS="${LDFLAGS:-} -sDISABLE_EXCEPTION_CATCHING=0"
-
 if command -v ccache >/dev/null 2>&1; then
   export CMAKE_C_COMPILER_LAUNCHER=ccache
   export CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -96,4 +93,7 @@ fi
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 cd "$source_dir"
-pyodide build --exports=whole_archive --outdir "$output_dir"
+pyodide build \
+  --skip-emscripten-install \
+  --exports=whole_archive \
+  --outdir "$output_dir"

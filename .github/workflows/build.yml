@@ -91,7 +91,17 @@ jobs:
         with:
           python-version: ${{ steps.config.outputs.python_version }}
 
+      - name: Restore Pyodide cross-build environment
+        id: xbuildenv-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .pyodide-xbuildenv
+          key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
+
       - name: Install build tools
+        env:
+          DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
+          PYODIDE_XBUILDENV_PATH: ${{ github.workspace }}/.pyodide-xbuildenv
         run: |
           python -m pip install --upgrade pip
           python -m pip install \
@@ -99,44 +109,29 @@ jobs:
             "wheel==${WHEEL_VERSION}" \
             "ninja==${NINJA_VERSION}" \
             "cmake==${CMAKE_VERSION}"
-          python scripts/repair_pyodide_build.py
-          python - <<'PY'
-          from pyodide_build.pywasmcross import BuildArgs, handle_command_generate_args
-
-          probe = ["cmake", "-E", "capabilities"]
-          actual_probe = handle_command_generate_args(probe.copy(), BuildArgs(), False)
-          if actual_probe != probe:
-              raise RuntimeError(f"CMake command mode was cross-wrapped: {actual_probe}")
-
-          configure = ["cmake", "-S", ".", "-B", "build"]
-          actual_configure = handle_command_generate_args(
-              configure.copy(), BuildArgs(), False
-          )
-          if actual_configure[:2] != ["emcmake", "cmake"]:
-              raise RuntimeError(f"CMake configure bypassed emcmake: {actual_configure}")
-          if "--fresh" not in actual_configure:
-              raise RuntimeError(f"CMake configure omitted --fresh: {actual_configure}")
-          compiler_flags = ("-DCMAKE_C_COMPILER=", "-DCMAKE_CXX_COMPILER=")
-          if any(
-              not any(argument.startswith(prefix) for argument in actual_configure)
-              for prefix in compiler_flags
-          ):
-              raise RuntimeError(
-                  f"CMake configure omitted compiler wrappers: {actual_configure}"
-              )
-          PY
+          actual_pyodide_build="$(python -c 'import importlib.metadata; print(importlib.metadata.version("pyodide-build"))')"
+          test "$actual_pyodide_build" = "$PYODIDE_BUILD_VERSION"
+          test "$(cmake --version | head -1)" = "cmake version $CMAKE_VERSION"
           sudo apt-get update
           sudo apt-get install --yes ccache
-          pyodide config get emscripten_version
+          actual_emscripten="$(pyodide config get emscripten_version)"
+          test "$actual_emscripten" = "$EMSCRIPTEN_VERSION"
+
+      - name: Save Pyodide cross-build environment
+        if: steps.xbuildenv-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .pyodide-xbuildenv
+          key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
 
       - name: Restore compiler cache
         id: ccache-restore
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-
 
@@ -167,12 +162,20 @@ jobs:
           version: ${{ steps.config.outputs.emscripten_version }}
           actions-cache-folder: emsdk-cache
 
+      - name: Verify Emscripten CMake link features
+        run: |
+          toolchain="$(em-config EMSCRIPTEN_ROOT)/cmake/Modules/Platform/Emscripten.cmake"
+          grep -Fq \
+            'set(CMAKE_LINK_LIBRARY_USING_WHOLE_ARCHIVE_SUPPORTED True)' \
+            "$toolchain"
+
       - name: Build raw WebAssembly wheel
         env:
           CCACHE_COMPILERCHECK: content
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
+          PYODIDE_XBUILDENV_PATH: ${{ github.workspace }}/.pyodide-xbuildenv
           PYTORCH_HOST_PROTOC: ${{ runner.temp }}/pytorch-host-protobuf/bin/protoc
         run: |
           ccache --zero-stats
@@ -197,7 +200,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune and validate wheel
         id: wheel

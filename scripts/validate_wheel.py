@@ -267,7 +267,7 @@ def validate(path: Path) -> dict[str, object]:
 
     expected_tag = (
         f"{values['PYTHON_TAG']}-{values['PYTHON_TAG']}-"
-        f"emscripten_{values['EMSCRIPTEN_VERSION'].replace('.', '_')}_wasm32"
+        f"{values['PYODIDE_PLATFORM_TAG']}"
     )
     if not path.name.endswith(f"-{expected_tag}.whl"):
         raise ValueError(f"wheel filename does not end with -{expected_tag}.whl")

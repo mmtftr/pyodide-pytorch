@@ -25,6 +25,7 @@ ENV_KEYS = {
     "PYTHON_VERSION": ("pyodide", "python_version"),
     "PYTHON_TAG": ("pyodide", "python_tag"),
     "EMSCRIPTEN_VERSION": ("pyodide", "emscripten_version"),
+    "PYODIDE_PLATFORM_TAG": ("pyodide", "platform_tag"),
     "RELEASE_TAG": ("release", "tag"),
     "MAX_JOBS": ("build", "max_jobs"),
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
@@ -57,6 +58,7 @@ def validate(config: dict[str, Any]) -> list[str]:
         python_version = str(lookup(config, ("pyodide", "python_version")))
         python_tag = str(lookup(config, ("pyodide", "python_tag")))
         emscripten = str(lookup(config, ("pyodide", "emscripten_version")))
+        platform_tag = str(lookup(config, ("pyodide", "platform_tag")))
         release_tag = str(lookup(config, ("release", "tag")))
         max_jobs = int(lookup(config, ("build", "max_jobs")))
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
@@ -72,8 +74,12 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("pytorch.repository must use the canonical HTTPS URL")
     if not re.fullmatch(r"[0-9A-Za-z.+!-]+", version):
         errors.append("pytorch.version contains unexpected characters")
-    if pyodide_version != build_version:
-        errors.append("pyodide.version and pyodide.build_version must match")
+    for name, value in (
+        ("pyodide.version", pyodide_version),
+        ("pyodide.build_version", build_version),
+    ):
+        if not re.fullmatch(r"\d+\.\d+\.\d+", value):
+            errors.append(f"{name} must be a three-part version")
     if not re.fullmatch(r"\d+\.\d+\.\d+", python_version):
         errors.append("pyodide.python_version must be a three-part version")
     else:
@@ -83,6 +89,8 @@ def validate(config: dict[str, Any]) -> list[str]:
             errors.append(f"python_tag must be {expected_tag} for {python_version}")
     if not re.fullmatch(r"\d+\.\d+\.\d+", emscripten):
         errors.append("pyodide.emscripten_version must be a three-part version")
+    if not re.fullmatch(r"pyemscripten_\d+_\d+_wasm32", platform_tag):
+        errors.append("pyodide.platform_tag must be a pyemscripten wasm32 tag")
     release_match = re.fullmatch(
         r"torch-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*-pyodide-"
         r"(?P<pyodide>\d+\.\d+\.\d+)(?:-r[1-9]\d*)?",

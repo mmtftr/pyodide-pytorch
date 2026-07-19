@@ -7,7 +7,6 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +14,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import config  # noqa: E402
 import postprocess_wheel  # noqa: E402
-import repair_pyodide_build  # noqa: E402
 import verify_release_artifact  # noqa: E402
 import validate_wheel  # noqa: E402
 
@@ -88,10 +86,23 @@ class ToolTests(unittest.TestCase):
     def test_manifest_is_valid(self) -> None:
         self.assertEqual(config.validate(config.load()), [])
 
+    def test_runtime_and_build_tool_versions_are_independent(self) -> None:
+        manifest = config.load()
+        manifest["pyodide"]["build_version"] = "9.8.7"
+        self.assertEqual(config.validate(manifest), [])
+
+    def test_platform_tag_must_use_the_pyemscripten_abi(self) -> None:
+        manifest = config.load()
+        manifest["pyodide"]["platform_tag"] = "emscripten_5_0_3_wasm32"
+        self.assertIn(
+            "pyodide.platform_tag must be a pyemscripten wasm32 tag",
+            config.validate(manifest),
+        )
+
     def test_release_tag_uses_pinned_pyodide_version(self) -> None:
         manifest = config.load()
         manifest["release"]["tag"] = (
-            "torch-prefix-pyodide-0.24.1-decoy-pyodide-9.9.9-r1"
+            "torch-prefix-pyodide-314.0.2-decoy-pyodide-9.9.9-r1"
         )
         self.assertIn(
             "release.tag must contain the pinned Pyodide version",
@@ -100,7 +111,7 @@ class ToolTests(unittest.TestCase):
 
     def test_release_tag_rejects_invalid_git_ref_components(self) -> None:
         manifest = config.load()
-        manifest["release"]["tag"] = "torch-a..b-pyodide-0.24.1-r1"
+        manifest["release"]["tag"] = "torch-a..b-pyodide-314.0.2-r1"
         self.assertIn(
             "release.tag must match torch-*-pyodide-X.Y.Z[-rN]",
             config.validate(manifest),
@@ -148,53 +159,6 @@ class ToolTests(unittest.TestCase):
             ],
         )
 
-    def test_pyodide_toolchain_repair_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "Emscripten.cmake"
-            self.assertTrue(repair_pyodide_build.install_toolchain(destination))
-            self.assertFalse(repair_pyodide_build.install_toolchain(destination))
-            destination.write_text("unexpected", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "does not match"):
-                repair_pyodide_build.install_toolchain(destination)
-
-    def test_pyodide_cmake_command_mode_repair_is_idempotent(self) -> None:
-        source = (
-            '    elif cmd == "cmake":\n'
-            f"{repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL}\n"
-            "            return line\n"
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            destination = Path(temporary) / "pywasmcross.py"
-            destination.write_text(source, encoding="utf-8")
-            original_digest = repair_pyodide_build.digest(destination)
-            fixed_source = source.replace(
-                repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL,
-                repair_pyodide_build.CMAKE_COMMAND_MODE_FIXED,
-            )
-            fixed_digest = hashlib.sha256(fixed_source.encode()).hexdigest()
-            with mock.patch.multiple(
-                repair_pyodide_build,
-                PYWASMCROSS_EXPECTED_SHA256=original_digest,
-                PYWASMCROSS_FIXED_SHA256=fixed_digest,
-            ):
-                self.assertTrue(
-                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
-                )
-                self.assertFalse(
-                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
-                )
-                repaired = destination.read_text(encoding="utf-8")
-                self.assertIn(
-                    repair_pyodide_build.CMAKE_COMMAND_MODE_FIXED, repaired
-                )
-                self.assertNotIn(
-                    repair_pyodide_build.CMAKE_COMMAND_MODE_ORIGINAL, repaired
-                )
-
-                destination.write_text("unexpected", encoding="utf-8")
-                with self.assertRaisesRegex(RuntimeError, "has SHA-256"):
-                    repair_pyodide_build.install_cmake_command_mode_fix(destination)
-
     def test_release_artifact_verification_binds_inputs_and_commit(self) -> None:
         builder_commit = "a" * 40
         with tempfile.TemporaryDirectory() as temporary:
@@ -236,7 +200,7 @@ class ToolTests(unittest.TestCase):
         values = config.flat_env(config.load())
         tag = (
             f"{values['PYTHON_TAG']}-{values['PYTHON_TAG']}-"
-            f"emscripten_{values['EMSCRIPTEN_VERSION'].replace('.', '_')}_wasm32"
+            f"{values['PYODIDE_PLATFORM_TAG']}"
         )
         name = f"torch-test-{tag}.whl"
         metadata = """Metadata-Version: 2.1

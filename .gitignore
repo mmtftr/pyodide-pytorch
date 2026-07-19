@@ -1,4 +1,6 @@
 .DS_Store
+.ccache/
+.pyodide-xbuildenv/
 *.log
 *.whl
 *.zip

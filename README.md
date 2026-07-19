@@ -5,8 +5,8 @@ deliberately single-threaded: it does not enable Emscripten pthreads or
 WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
 
 > [!IMPORTANT]
-> The pinned upgrade target is PyTorch `cf30153` (`2.13.0`) while intentionally
-> retaining Pyodide `0.24.1`, CPython `3.11.2`, and Emscripten `3.1.45`.
+> The pinned upgrade target is PyTorch `cf30153` (`2.13.0`) on Pyodide
+> `314.0.2`, CPython `3.14.2`, and Emscripten `5.0.3`.
 > At this revision, only applicability of the ordered patch series to the exact
 > PyTorch source has been validated. Wheel compatibility is not established
 > until the canonical CI full build, binary validation, and Pyodide smoke test
@@ -66,7 +66,7 @@ so load the packages explicitly:
 
 ```html
 <script type="module">
-  import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.mjs";
+  import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.mjs";
 
   const pyodide = await loadPyodide();
   await pyodide.loadPackage([
@@ -93,9 +93,10 @@ so load the packages explicitly:
 </script>
 ```
 
-Verify the release checksum before deploying the wheel. PyPI does not accept
-Emscripten platform wheels, so GitHub Releases (or your own static origin) is
-the distribution channel.
+Verify the release checksum before deploying the wheel. The wheel uses
+Pyodide's standardized `pyemscripten_2026_0_wasm32` platform tag. This
+repository publishes it through GitHub Releases; a CORS-enabled static origin
+also works.
 
 ## Build
 
@@ -127,7 +128,8 @@ The pipeline performs these steps:
    order.
 3. Builds a host `protoc` from the matching protobuf submodule.
 4. Installs the pinned `pyodide-build` and Emscripten toolchains.
-5. Runs `pyodide build --exports=whole_archive` with the CPU-only feature set.
+5. Runs `pyodide build --skip-emscripten-install --exports=whole_archive` with
+   the CPU-only feature set and the separately pinned Emscripten installation.
 6. Prunes build-time payloads and rewrites wheel RECORD hashes
    deterministically.
 7. Rejects an ABI mismatch, native/non-Wasm `.so`, static archive, shared
@@ -165,11 +167,10 @@ release. Instead:
 4. Build a fresh wheel and pass both binary validation and the runtime suite.
 5. Add tests for any newly supported surface before publishing.
 
-The current Pyodide line uses a newer Python/Emscripten ABI. It should be added
-as a separate tested build after selecting a PyTorch revision that supports
-that Python version; it is not safe to infer compatibility from a successful
-link alone. See [compatibility and scope](docs/compatibility.md) for intentional
-omissions.
+Pyodide's platform ABI is versioned independently of its raw Emscripten
+version. Keep the runtime, cross-build environment, Python tag, platform tag,
+and Emscripten pin together, then require a fresh runtime smoke test. See
+[compatibility and scope](docs/compatibility.md) for intentional omissions.
 
 ## Project status
 
