@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   create:
   push:
-    branches: [main]
+    branches: [main, codex/pyodide-wasm-exceptions]
     tags: ["torch-*-pyodide-*"]
     paths:
       - "config/**"
