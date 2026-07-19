@@ -93,7 +93,7 @@ jobs:
 
       - name: Restore Pyodide cross-build environment
         id: xbuildenv-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .pyodide-xbuildenv
           key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
@@ -119,14 +119,14 @@ jobs:
 
       - name: Save Pyodide cross-build environment
         if: steps.xbuildenv-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .pyodide-xbuildenv
           key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
 
       - name: Restore compiler cache
         id: ccache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Restore native protoc cache
         id: protoc-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
           key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
@@ -163,7 +163,7 @@ jobs:
 
       - name: Save native protoc cache
         if: steps.protoc-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
           key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
@@ -213,7 +213,7 @@ jobs:
       - name: Save compiler cache
         if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
