@@ -1,7 +1,7 @@
 [pytorch]
 repository = "https://github.com/pytorch/pytorch.git"
-ref = "7bcf7da3a268b435777fe87c7794c382f444e86d"
-version = "2.1.0a0+git7bcf7da.pyodide0.24.1"
+ref = "cf30153c4c131c8164ee7798e5022d810682e2cb"
+version = "2.13.0+pyodide0.24.1"
 
 [pyodide]
 version = "0.24.1"
@@ -11,7 +11,7 @@ python_tag = "cp311"
 emscripten_version = "3.1.45"
 
 [release]
-tag = "torch-2.1.0a0-git7bcf7da-pyodide-0.24.1-r1"
+tag = "torch-2.13.0-pyodide-0.24.1-r1"
 
 [build]
 max_jobs = 3

@@ -1,23 +1,20 @@
-From 86b477e61c5fde97d13b9f7b3bf40b6e79d53555 Mon Sep 17 00:00:00 2001
+From 51008bc99788fc12c55d665d049762e10b6ecdbe Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Fri, 17 Jul 2026 00:00:00 +0300
-Subject: [PATCH 1/6] Add Pyodide runtime guards
+Date: Sun, 19 Jul 2026 11:45:03 +0300
+Subject: [PATCH 1/4] Add Pyodide runtime guards
 
-Avoid native dynamic-library and shared-memory setup in Pyodide. Emscripten's
-size_t also needs the explicit symbolic integer overload, while its libc owns
-the __assert_fail declaration.
+Avoid native dynamic-library and shared-memory setup in Pyodide, and provide Emscripten size_t symbolic integer overloads.
 ---
  c10/core/SymInt.cpp | 2 +-
  c10/core/SymInt.h   | 2 +-
- c10/macros/Macros.h | 2 ++
  torch/__init__.py   | 5 +++++
- 4 files changed, 9 insertions(+), 2 deletions(-)
+ 3 files changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/c10/core/SymInt.cpp b/c10/core/SymInt.cpp
-index dd5029c..29a6ad5 100644
+index 1078ae03..92a3a12c 100644
 --- a/c10/core/SymInt.cpp
 +++ b/c10/core/SymInt.cpp
-@@ -235,7 +235,7 @@ DEFINE_SYMINT_OP(uint32_t, SymInt)
+@@ -272,7 +272,7 @@ DEFINE_SYMINT_OP(uint32_t, SymInt)
  DEFINE_SYMINT_OP(double, SymFloat)
  DEFINE_SYMINT_OP(float, SymFloat) // just for completeness
  
@@ -27,10 +24,10 @@ index dd5029c..29a6ad5 100644
  DEFINE_SYMINT_OP(size_t, SymInt) // needed for osx
  #endif
 diff --git a/c10/core/SymInt.h b/c10/core/SymInt.h
-index 5b0ccf1..468e1b2 100644
+index ad004a5b..0ac43a67 100644
 --- a/c10/core/SymInt.h
 +++ b/c10/core/SymInt.h
-@@ -336,7 +336,7 @@ DECLARE_SYMINT_OP(float, SymFloat) // just for completeness
+@@ -493,7 +493,7 @@ DECLARE_SYMINT_OP(float, SymFloat) // just for completeness
  
  // On OSX size_t is different than uint64_t so we have to
  // define it separately
@@ -39,48 +36,26 @@ index 5b0ccf1..468e1b2 100644
  DECLARE_SYMINT_OP_INTONLY(size_t, SymInt)
  DECLARE_SYMINT_OP(size_t, SymInt)
  #endif
-diff --git a/c10/macros/Macros.h b/c10/macros/Macros.h
-index 92b941b..01458a5 100644
---- a/c10/macros/Macros.h
-+++ b/c10/macros/Macros.h
-@@ -382,6 +382,7 @@ extern SYCL_EXTERNAL void __assert_fail(
- __host__ __device__
- #endif
- 
-+#if !defined(__EMSCRIPTEN__)
-     // This forward declaration matching the declaration of __assert_fail
-     // exactly how it is in glibc in case parts of the program are compiled with
-     // different NDEBUG settings. Otherwise we might get 'ambiguous declaration'
-@@ -392,6 +393,7 @@ __host__ __device__
-         const char* file,
-         unsigned int line,
-         const char* function) noexcept __attribute__((__noreturn__));
-+#endif
- 
- #if (defined(__HIP_ARCH__) || defined(__HIP__)) && \
-     !defined(TORCH_DISABLE_GPU_ASSERTS)
 diff --git a/torch/__init__.py b/torch/__init__.py
-index 881f0e3..772c230 100644
+index 629122af..10d44e6e 100644
 --- a/torch/__init__.py
 +++ b/torch/__init__.py
-@@ -163,6 +163,9 @@ def _preload_cuda_deps(lib_folder, lib_name):
+@@ -367,6 +367,9 @@ def _preload_cuda_deps(err: OSError | None = None) -> None:
  
  # See Note [Global dependencies]
  def _load_global_deps() -> None:
 +    if sys.platform == "emscripten":
 +        return
 +
-     if _running_with_deploy() or platform.system() == 'Windows':
+     if platform.system() == "Windows":
          return
  
-@@ -1313,6 +1316,8 @@ from ._tensor_str import set_printoptions
- ################################################################################
+@@ -2177,6 +2180,8 @@ from torch.serialization import load, save
  
- def manager_path():
+ # Shared memory manager needs to know the exact location of manager executable
+ def _manager_path():
 +    if sys.platform == "emscripten":
 +        return b""
-     if _running_with_deploy() or platform.system() == 'Windows':
+     if platform.system() == "Windows":
          return b""
-     path = get_file_path('torch', 'bin', 'torch_shm_manager')
--- 
-2.51.1
+     path = get_file_path("torch", "bin", "torch_shm_manager")

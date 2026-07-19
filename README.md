@@ -5,10 +5,13 @@ deliberately single-threaded: it does not enable Emscripten pthreads or
 WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
 
 > [!IMPORTANT]
-> The initial target is a compatibility baseline, not current PyTorch:
-> PyTorch `7bcf7da` (`2.1.0a0`) on Pyodide `0.24.1`, CPython `3.11.2`, and
-> Emscripten `3.1.45`. Wheels are ABI-specific and must be used with the exact
-> Pyodide version named by the release.
+> The pinned upgrade target is PyTorch `cf30153` (`2.13.0`) while intentionally
+> retaining Pyodide `0.24.1`, CPython `3.11.2`, and Emscripten `3.1.45`.
+> At this revision, only applicability of the ordered patch series to the exact
+> PyTorch source has been validated. Wheel compatibility is not established
+> until the canonical CI full build, binary validation, and Pyodide smoke test
+> pass for this exact commit. Wheels are ABI-specific and must be used with the
+> exact Pyodide version named by the release.
 
 ## What this repository provides
 
@@ -140,6 +143,11 @@ python3 scripts/validate_patches.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash -n scripts/*.sh
 ```
+
+The validation workflow additionally checks out the exact pinned PyTorch
+commit without submodules and applies the complete patch series. This is a
+fast drift check only; it does not substitute for the full WebAssembly build
+and runtime smoke test.
 
 Cross-compiling PyTorch is resource-intensive. For a local full build, mirror
 the commands in [`.github/workflows/build.yml`](.github/workflows/build.yml) on

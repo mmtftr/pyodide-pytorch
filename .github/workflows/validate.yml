@@ -36,8 +36,46 @@ jobs:
         run: |
           bash -n scripts/*.sh
           git diff --check HEAD
+
+  patch-applicability:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out build repository
+        uses: actions/checkout@v4
+      - name: Read pinned configuration
+        id: config
+        run: |
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+      - name: Check out pinned PyTorch source without submodules
+        uses: actions/checkout@v4
+        with:
+          repository: pytorch/pytorch
+          ref: ${{ steps.config.outputs.pytorch_ref }}
+          path: pytorch-patch-check
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+      - name: Apply ordered patches to pinned source
+        run: scripts/apply_patches.sh pytorch-patch-check
+
+  validation-status:
+    if: always()
+    needs: [validate, patch-applicability]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
       - name: Publish final validation status
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/publish_status.sh pytorch-pyodide/validate "${{ job.status }}"
+          PATCH_RESULT: ${{ needs.patch-applicability.result }}
+          REPOSITORY_RESULT: ${{ needs.validate.result }}
+        run: |
+          if [[ "$REPOSITORY_RESULT" == success && "$PATCH_RESULT" == success ]]; then
+            result=success
+          elif [[ "$REPOSITORY_RESULT" == cancelled || "$PATCH_RESULT" == cancelled ]]; then
+            result=cancelled
+          else
+            result=failure
+          fi
+          scripts/publish_status.sh pytorch-pyodide/validate "$result"

@@ -109,16 +109,18 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-${{ hashFiles('patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-
 
       - name: Restore native protoc cache
         id: protoc-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
-          key: host-protoc-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.cmake_version }}
+          key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
 
       - name: Build native protoc from the pinned submodule
         if: steps.protoc-restore.outputs.cache-hit != 'true'
@@ -132,7 +134,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
-          key: host-protoc-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.cmake_version }}
+          key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
 
       - name: Set up pinned Emscripten
         uses: mymindstorm/setup-emsdk@v14
@@ -142,6 +144,7 @@ jobs:
 
       - name: Build raw WebAssembly wheel
         env:
+          CCACHE_COMPILERCHECK: content
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
@@ -153,12 +156,23 @@ jobs:
           scripts/build_wheel.sh pytorch wheelhouse/raw
           ccache --show-stats
 
+      - name: Prepare compiler cache for rolling save
+        if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          ccache --cleanup
+          ccache --show-stats
+
       - name: Save compiler cache
-        if: ${{ always() && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-${{ steps.config.outputs.pytorch_ref }}-${{ steps.config.outputs.pyodide_version }}-${{ hashFiles('patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/repair_pyodide_build.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune and validate wheel
         id: wheel

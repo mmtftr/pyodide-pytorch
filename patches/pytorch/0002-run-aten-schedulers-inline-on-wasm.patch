@@ -1,37 +1,37 @@
-From c9bd3669f4d1cfb2d0571d6599454cde569f1327 Mon Sep 17 00:00:00 2001
+From aab0fc20d88dedd689fcda63869a26c7847d174f Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Fri, 17 Jul 2026 00:00:01 +0300
-Subject: [PATCH 2/6] Run ATen schedulers inline on threadless Wasm
+Date: Sun, 19 Jul 2026 11:45:46 +0300
+Subject: [PATCH 2/4] Run ATen schedulers inline on threadless Wasm
 
-Define PYTORCH_WASM_NO_THREADS for the Emscripten build. Report exactly one intra-op and inter-op thread, reject attempts to increase the counts, and execute scheduled work synchronously.
+Define a single-threaded Emscripten mode, report one worker, reject larger thread counts, and execute scheduled work synchronously.
 ---
  CMakeLists.txt                             |  4 ++++
  aten/src/ATen/ParallelNative.cpp           | 26 ++++++++++++++++++++++
  aten/src/ATen/ParallelThreadPoolNative.cpp | 15 +++++++++++++
- c10/core/thread_pool.h                     |  4 ++++
+ c10/core/thread_pool.cpp                   |  4 ++++
  torch/csrc/autograd/engine.cpp             | 11 +++++++--
  5 files changed, 58 insertions(+), 2 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 3a48eaf..8f77efa 100644
+index a8b655d9..13776f1e 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -705,6 +705,10 @@ if(NOT IOS AND CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES M
-   set(CAFFE2_CUSTOM_PROTOC_EXECUTABLE "${PROJECT_SOURCE_DIR}/build_host_protoc/bin/protoc")
+@@ -706,6 +706,10 @@ if(LINUX AND CPU_AARCH64)
+   add_link_options_if_supported("--stub-group-size=0x2000000")
  endif()
  
 +if(EMSCRIPTEN)
 +  add_compile_definitions(PYTORCH_WASM_NO_THREADS=1)
 +endif()
 +
- # ---[ Misc checks to cope with various compiler modes
- include(cmake/MiscCheck.cmake)
- 
+ # Set INTERN_BUILD_MOBILE for all mobile builds. Components that are not
+ # applicable to mobile are disabled by this variable. Setting
+ # `BUILD_PYTORCH_MOBILE_WITH_HOST_TOOLCHAIN` environment variable can force it
 diff --git a/aten/src/ATen/ParallelNative.cpp b/aten/src/ATen/ParallelNative.cpp
-index 3b9ea48..c2f709e 100644
+index 805df08a..3c81c74e 100644
 --- a/aten/src/ATen/ParallelNative.cpp
 +++ b/aten/src/ATen/ParallelNative.cpp
-@@ -211,6 +211,12 @@ void init_num_threads() {
+@@ -213,6 +213,12 @@ void init_num_threads() {
  }
  
  void set_num_threads(int nthreads) {
@@ -44,7 +44,7 @@ index 3b9ea48..c2f709e 100644
  #ifndef C10_MOBILE
    TORCH_CHECK(nthreads > 0, "Expected positive number of threads");
    int no_value = NOT_SET;
-@@ -235,9 +241,13 @@ void set_num_threads(int nthreads) {
+@@ -236,9 +242,13 @@ void set_num_threads(int nthreads) {
    TORCH_INTERNAL_ASSERT(pool, "Invalid thread pool!");
    pool->set_thread_count(nthreads);
  #endif // C10_MOBILE
@@ -83,14 +83,14 @@ index 3b9ea48..c2f709e 100644
 +#endif // PYTORCH_WASM_NO_THREADS
  }
  
- void intraop_launch(std::function<void()> func) {
+ void intraop_launch(const std::function<void()>& func) {
 +#if defined(PYTORCH_WASM_NO_THREADS)
 +  func();
 +#else
  #ifndef C10_MOBILE
    if (!in_parallel_region() && get_num_threads() > 1) {
-     _get_intraop_pool().run(std::move(func));
-@@ -288,10 +306,17 @@ void intraop_launch(std::function<void()> func) {
+     _get_intraop_pool().run(func);
+@@ -288,10 +306,17 @@ void intraop_launch(const std::function<void()>& func) {
    // Task parallelism is not currently supported.
    func();
  #endif // C10_MOBILE
@@ -98,7 +98,7 @@ index 3b9ea48..c2f709e 100644
  }
  
  c10::intrusive_ptr<c10::ivalue::Future> intraop_launch_future(
-     std::function<void()> func) {
+     const std::function<void()>& func) {
 +#if defined(PYTORCH_WASM_NO_THREADS)
 +  auto future = c10::make_intrusive<c10::ivalue::Future>(c10::NoneType::get());
 +  func();
@@ -117,11 +117,11 @@ index 3b9ea48..c2f709e 100644
  
  } // namespace at
 diff --git a/aten/src/ATen/ParallelThreadPoolNative.cpp b/aten/src/ATen/ParallelThreadPoolNative.cpp
-index a9d5095..ca2af16 100644
+index 5af4dfcc..a3e17b24 100644
 --- a/aten/src/ATen/ParallelThreadPoolNative.cpp
 +++ b/aten/src/ATen/ParallelThreadPoolNative.cpp
 @@ -48,15 +48,25 @@ std::shared_ptr<TaskThreadPoolBase> create_c10_threadpool(
- C10_REGISTER_CREATOR(ThreadPoolRegistry, C10, create_c10_threadpool);
+ C10_REGISTER_CREATOR(ThreadPoolRegistry, C10, create_c10_threadpool)
  
  void set_num_interop_threads(int nthreads) {
 +#if defined(PYTORCH_WASM_NO_THREADS)
@@ -139,14 +139,14 @@ index a9d5095..ca2af16 100644
 +#endif
  }
  
- int get_num_interop_threads() {
+ size_t get_num_interop_threads() {
 +#if defined(PYTORCH_WASM_NO_THREADS)
 +  return 1;
 +#else
    at::internal::lazy_init_num_threads();
    int nthreads = num_interop_threads.load();
    if (nthreads > 0) {
-@@ -67,15 +77,20 @@ int get_num_interop_threads() {
+@@ -67,15 +77,20 @@ size_t get_num_interop_threads() {
    } else {
      return get_pool().size();
    }
@@ -167,40 +167,42 @@ index a9d5095..ca2af16 100644
  }
  } // namespace internal
  
-diff --git a/c10/core/thread_pool.h b/c10/core/thread_pool.h
-index 5d09e25..71d06b8 100644
---- a/c10/core/thread_pool.h
-+++ b/c10/core/thread_pool.h
-@@ -38,11 +38,15 @@ class C10_API TaskThreadPoolBase {
-   virtual ~TaskThreadPoolBase() noexcept = default;
+diff --git a/c10/core/thread_pool.cpp b/c10/core/thread_pool.cpp
+index 7effe584..b7f13542 100644
+--- a/c10/core/thread_pool.cpp
++++ b/c10/core/thread_pool.cpp
+@@ -8,6 +8,9 @@
+ namespace c10 {
  
-   static size_t defaultNumThreads() {
+ size_t TaskThreadPoolBase::defaultNumThreads() {
 +#if defined(PYTORCH_WASM_NO_THREADS)
-+    return 1;
++  return 1;
 +#else
-     auto num_threads = std::thread::hardware_concurrency();
- #if defined(_M_X64) || defined(__x86_64__)
-     num_threads /= 2;
- #endif
-     return num_threads;
-+#endif
+   size_t num_threads = 0;
+ #if !defined(__powerpc__) && !defined(__s390x__)
+   if (cpuinfo_initialize()) {
+@@ -28,6 +31,7 @@ size_t TaskThreadPoolBase::defaultNumThreads() {
+     num_threads = 1;
    }
- };
+   return num_threads;
++#endif
+ }
  
+ ThreadPool::ThreadPool(
 diff --git a/torch/csrc/autograd/engine.cpp b/torch/csrc/autograd/engine.cpp
-index 9e6a04d..39c50b2 100644
+index 2fd391e6..3b39c93a 100644
 --- a/torch/csrc/autograd/engine.cpp
 +++ b/torch/csrc/autograd/engine.cpp
-@@ -62,7 +62,7 @@ static void forked_autograd_child() {
+@@ -58,7 +58,7 @@ static void forked_autograd_child() {
  
  // Should be called before unsafe for forks (thread pool) calls
  static void track_bad_autograd_forks() {
 -#if !defined(WIN32)
 +#if !defined(WIN32) && !defined(PYTORCH_WASM_NO_THREADS)
-   static c10::once_flag flag;
-   c10::call_once(
-       flag, [&] { pthread_atfork(nullptr, nullptr, forked_autograd_child); });
-@@ -1320,7 +1320,14 @@ c10::intrusive_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
+   static auto result [[maybe_unused]] =
+       pthread_atfork(nullptr, nullptr, forked_autograd_child);
+ #endif
+@@ -1461,7 +1461,14 @@ c10::intrusive_ptr<at::ivalue::Future> Engine::execute_with_graph_task(
      queue->push(
          NodeTask(graph_task, std::move(graph_root), std::move(input_buffer)));
  
@@ -216,5 +218,3 @@ index 9e6a04d..39c50b2 100644
        // See Note [Reentrant backwards]
        // If reached the max depth, switch to a different thread
        add_thread_pool_task(graph_task);
--- 
-2.51.1
