@@ -1,0 +1,25 @@
+From 3d8b72a7e2e8ba870789e76fb2c8d3c1f69c79cb Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Sun, 19 Jul 2026 15:19:00 +0300
+Subject: [PATCH 5/5] Use the Pyodide Wasm exception ABI
+
+Do not enable Emscripten's legacy JavaScript exception mode. Pyodide's current
+ABI supplies -fwasm-exceptions, which is mutually exclusive with
+DISABLE_EXCEPTION_CATCHING.
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 33f830e9..b53a5a5b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1288,7 +1288,7 @@ if(EMSCRIPTEN)
+   string(
+     APPEND
+     CMAKE_CXX_FLAGS
+-    " -Wno-implicit-function-declaration -DEMSCRIPTEN -s DISABLE_EXCEPTION_CATCHING=0"
++    " -Wno-implicit-function-declaration -DEMSCRIPTEN"
+   )
+ endif()
+ 

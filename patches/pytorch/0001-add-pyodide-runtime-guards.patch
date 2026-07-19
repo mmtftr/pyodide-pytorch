@@ -1,7 +1,7 @@
 From 51008bc99788fc12c55d665d049762e10b6ecdbe Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Sun, 19 Jul 2026 11:45:03 +0300
-Subject: [PATCH 1/4] Add Pyodide runtime guards
+Subject: [PATCH 1/5] Add Pyodide runtime guards
 
 Avoid native dynamic-library and shared-memory setup in Pyodide, and provide Emscripten size_t symbolic integer overloads.
 ---
