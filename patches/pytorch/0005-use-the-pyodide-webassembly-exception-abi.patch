@@ -1,0 +1,25 @@
+From 7f821405442e2ebb83a2fdc13d1ad106f264e2be Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Sun, 19 Jul 2026 19:49:13 +0200
+Subject: [PATCH 5/5] Use the Pyodide WebAssembly exception ABI
+
+Pyodide 314 passes -fwasm-exceptions through its cross-build environment. Emscripten 5 rejects combining that ABI with the legacy DISABLE_EXCEPTION_CATCHING setting, so leave exception selection to the pinned Pyodide toolchain.
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 33f830e..b53a5a5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1288,7 +1288,7 @@ if(EMSCRIPTEN)
+   string(
+     APPEND
+     CMAKE_CXX_FLAGS
+-    " -Wno-implicit-function-declaration -DEMSCRIPTEN -s DISABLE_EXCEPTION_CATCHING=0"
++    " -Wno-implicit-function-declaration -DEMSCRIPTEN"
+   )
+ endif()
+ 
+-- 
+2.51.1

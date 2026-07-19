@@ -18,7 +18,9 @@ Only patch applicability against this exact PyTorch commit has been validated
 at this revision. The target remains provisional until the canonical CI full
 build passes binary validation and the runtime smoke suite in Pyodide 314.0.2.
 The build explicitly mirrors PyTorch 2.13's C++20 and C17 language-standard
-requirements.
+requirements. Exception handling follows the Pyodide 314 ABI
+(`-fwasm-exceptions` with Wasm `longjmp` support); the patch series removes
+PyTorch's incompatible legacy `DISABLE_EXCEPTION_CATCHING` setting.
 
 The wheel is CPU-only and intentionally has no WebAssembly shared memory. Both
 ATen thread counts are fixed at one, and inter-op work runs inline. Requests to
