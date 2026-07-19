@@ -276,6 +276,12 @@ def validate(path: Path) -> dict[str, object]:
         names = wheel.namelist()
         if len(names) != len(set(names)):
             raise ValueError("wheel contains duplicate members")
+        required_runtime_files = {"torch/__init__.py", "torch/version.py"}
+        missing_runtime_files = sorted(required_runtime_files - set(names))
+        if missing_runtime_files:
+            raise ValueError(
+                f"wheel is missing runtime files: {missing_runtime_files}"
+            )
         for name in names:
             if name.startswith("/") or ".." in Path(name).parts:
                 raise ValueError(f"unsafe wheel member: {name}")

@@ -1,7 +1,7 @@
 From 7f821405442e2ebb83a2fdc13d1ad106f264e2be Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Sun, 19 Jul 2026 19:49:13 +0200
-Subject: [PATCH 5/5] Use the Pyodide WebAssembly exception ABI
+Subject: [PATCH 5/6] Use the Pyodide WebAssembly exception ABI
 
 Pyodide 314 passes -fwasm-exceptions through its cross-build environment. Emscripten 5 rejects combining that ABI with the legacy DISABLE_EXCEPTION_CATCHING setting, so leave exception selection to the pinned Pyodide toolchain.
 ---

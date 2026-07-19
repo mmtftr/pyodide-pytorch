@@ -28,6 +28,14 @@ actual_emscripten="$(pyodide config get emscripten_version)"
 }
 emcc --version | head -1
 
+export PYODIDE_PYTHON_INCLUDE_DIR
+PYODIDE_PYTHON_INCLUDE_DIR="$(pyodide config get python_include_dir)"
+[[ -f "$PYODIDE_PYTHON_INCLUDE_DIR/Python.h" ]] || {
+  echo "Pyodide target Python headers are missing: $PYODIDE_PYTHON_INCLUDE_DIR/Python.h" >&2
+  exit 1
+}
+echo "Pyodide target Python headers: $PYODIDE_PYTHON_INCLUDE_DIR"
+
 export ATEN_THREADING=NATIVE
 export BLAS=Eigen
 export BUILD_BINARY=0

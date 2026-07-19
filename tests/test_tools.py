@@ -225,6 +225,8 @@ Tag: {tag}
             root = Path(temporary)
             source = root / name
             with zipfile.ZipFile(source, "w") as wheel:
+                wheel.writestr("torch/__init__.py", "")
+                wheel.writestr("torch/version.py", "__version__ = '0'\n")
                 wheel.writestr(
                     "torch/_C.test.so", wasm_with_imported_memory(shared=False)
                 )

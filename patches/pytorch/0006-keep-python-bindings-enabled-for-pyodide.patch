@@ -1,0 +1,59 @@
+From 8731f18fc287b5d346d5b8814c376736666f1b8e Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Sun, 19 Jul 2026 22:18:14 +0300
+Subject: [PATCH 6/6] Keep Python bindings enabled for Pyodide
+
+Pass Pyodide's target Python headers to CMake explicitly. Newer PyTorch
+otherwise accepts the host interpreter but rejects Development.Module while
+cross-compiling, silently disables BUILD_PYTHON, and produces a wheel without
+torch._C or generated version metadata.
+
+Fail configuration instead of silently building LibTorch if the target Python
+headers are ever rejected again.
+---
+ cmake/Dependencies.cmake     |  5 +++++
+ tools/setup_helpers/cmake.py | 12 ++++++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 2baa187..7353e7f 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -877,6 +877,11 @@ if(BUILD_PYTHON)
+     # Observers are required in the python build
+     caffe2_update_option(USE_OBSERVERS ON)
+   else()
++    if(EMSCRIPTEN)
++      message(FATAL_ERROR
++        "Python target headers were not found for the Emscripten build. "
++        "Set PYODIDE_PYTHON_INCLUDE_DIR to Pyodide's python_include_dir.")
++    endif()
+     message(WARNING "Python dependencies not met. Not compiling with python. Suppress this warning with -DBUILD_PYTHON=OFF")
+     caffe2_update_option(BUILD_PYTHON OFF)
+   endif()
+diff --git a/tools/setup_helpers/cmake.py b/tools/setup_helpers/cmake.py
+index da48473..e655307 100644
+--- a/tools/setup_helpers/cmake.py
++++ b/tools/setup_helpers/cmake.py
+@@ -287,6 +287,18 @@ class CMake:
+             "BUILD_TEST": build_test,
+         }
+ 
++        # FindPython cannot infer target headers from the host interpreter
++        # while cross-compiling. Pyodide supplies the target include directory
++        # explicitly so CMake keeps BUILD_PYTHON enabled and creates torch._C.
++        if pyodide_python_include := my_env.get("PYODIDE_PYTHON_INCLUDE_DIR"):
++            python_header = os.path.join(pyodide_python_include, "Python.h")
++            if not os.path.isfile(python_header):
++                raise RuntimeError(
++                    "PYODIDE_PYTHON_INCLUDE_DIR does not contain Python.h: "
++                    f"{pyodide_python_include}"
++                )
++            build_options["Python_INCLUDE_DIR"] = pyodide_python_include
++
+         use_numpy = not check_negative_env_flag("USE_NUMPY")
+         build_options["USE_NUMPY"] = use_numpy
+         if use_numpy:
+-- 
+2.51.1
+

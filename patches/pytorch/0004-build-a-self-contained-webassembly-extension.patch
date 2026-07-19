@@ -1,7 +1,7 @@
 From c3562880713f98c8df44b94b42a0248d5f1101f5 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Sun, 19 Jul 2026 11:51:39 +0300
-Subject: [PATCH 4/5] Build a self-contained WebAssembly extension
+Subject: [PATCH 4/6] Build a self-contained WebAssembly extension
 
 Build torch_python as a static archive for Emscripten and whole-archive it into torch._C through the CMake target graph. Omit unsupported shared-memory and lazy TorchScript backend paths.
 ---
