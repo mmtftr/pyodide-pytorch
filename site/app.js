@@ -1,12 +1,13 @@
-import { completeFromList } from "@codemirror/autocomplete";
+import { acceptCompletion } from "@codemirror/autocomplete";
 import { indentWithTab } from "@codemirror/commands";
 import { python, pythonLanguage } from "@codemirror/lang-python";
 import { EditorState, Prec } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { keymap } from "@codemirror/view";
+import { hoverTooltip, keymap } from "@codemirror/view";
 import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
+const CACHE_PREFIX = "pyodide-pytorch-playground-";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
@@ -90,12 +91,32 @@ print((matrix @ inverse).round(decimals=5))
   },
 });
 
-const TORCH_COMPLETIONS = completeFromList([
-  { label: "torch.tensor", type: "function", detail: "Create a tensor" },
-  { label: "torch.arange", type: "function" },
+const COMMON_COMPLETIONS = [
+  {
+    label: "print",
+    type: "function",
+    detail: "print(*objects, sep=' ', end='\\n', file=None, flush=False)",
+    info: "Print objects to a text stream.",
+  },
+  { label: "len", type: "function", detail: "len(object)", info: "Return the number of items." },
+  { label: "range", type: "class", detail: "range(stop) or range(start, stop, step)" },
+  { label: "enumerate", type: "class", detail: "enumerate(iterable, start=0)" },
+  { label: "zip", type: "class", detail: "zip(*iterables, strict=False)" },
+  { label: "list", type: "class" },
+  { label: "dict", type: "class" },
+  { label: "set", type: "class" },
+  { label: "tuple", type: "class" },
+  { label: "sum", type: "function" },
+  { label: "min", type: "function" },
+  { label: "max", type: "function" },
+  { label: "torch", type: "module", detail: "PyTorch package" },
+  { label: "torch.tensor", type: "function", detail: "torch.tensor(data, *, dtype=None, device=None, requires_grad=False)" },
+  { label: "torch.arange", type: "function", detail: "torch.arange(start=0, end, step=1, *, dtype=None)" },
   { label: "torch.zeros", type: "function" },
   { label: "torch.ones", type: "function" },
+  { label: "torch.randn", type: "function" },
   { label: "torch.manual_seed", type: "function" },
+  { label: "torch.no_grad", type: "class" },
   { label: "torch.nn", type: "module" },
   { label: "torch.nn.Linear", type: "class" },
   { label: "torch.nn.functional", type: "module" },
@@ -104,7 +125,20 @@ const TORCH_COMPLETIONS = completeFromList([
   { label: "torch.linalg", type: "module" },
   { label: "torch.linalg.inv", type: "function" },
   { label: "torch.linalg.eigvalsh", type: "function" },
-]);
+];
+
+const STATIC_DOCUMENTATION = new Map(
+  COMMON_COMPLETIONS.filter((item) => item.detail || item.info).map((item) => [
+    item.label,
+    {
+      symbol: item.label,
+      signature: item.detail ?? item.label,
+      documentation: item.info ?? "",
+      module: item.label.startsWith("torch") ? "torch" : "builtins",
+      qualname: item.label,
+    },
+  ]),
+);
 
 const STAGE_PROGRESS = {
   release: 4,
@@ -126,11 +160,13 @@ const elements = {
   torchValue: document.querySelector("#torch-value"),
   pyodideValue: document.querySelector("#pyodide-value"),
   wheelValue: document.querySelector("#wheel-value"),
+  cacheValue: document.querySelector("#cache-value"),
   releaseLink: document.querySelector("#release-link"),
   output: document.querySelector("#output"),
   run: document.querySelector("#run-button"),
   stop: document.querySelector("#stop-button"),
   restart: document.querySelector("#restart-button"),
+  clearCache: document.querySelector("#clear-cache-button"),
   copy: document.querySelector("#copy-button"),
   clear: document.querySelector("#clear-button"),
   resetCode: document.querySelector("#reset-code-button"),
@@ -143,6 +179,11 @@ let runtimeWorker = null;
 let selectedRelease = null;
 let runtimeReady = false;
 let running = false;
+let requestSequence = 0;
+
+const pendingWorkerRequests = new Map();
+const inspectionCache = new Map();
+const completionCache = new Map();
 
 function currentExample() {
   return EXAMPLES[elements.example.value] ?? EXAMPLES.autograd;
@@ -161,16 +202,164 @@ function runShortcut() {
   return true;
 }
 
+function clearWorkerRequests() {
+  for (const { resolve, timeout } of pendingWorkerRequests.values()) {
+    window.clearTimeout(timeout);
+    resolve(null);
+  }
+  pendingWorkerRequests.clear();
+  inspectionCache.clear();
+  completionCache.clear();
+}
+
+function requestWorker(type, payload) {
+  if (!runtimeReady || running || !runtimeWorker) return Promise.resolve(null);
+  const id = ++requestSequence;
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      pendingWorkerRequests.delete(id);
+      resolve(null);
+    }, 5000);
+    pendingWorkerRequests.set(id, { resolve, timeout });
+    runtimeWorker.postMessage({ type, id, ...payload });
+  });
+}
+
+async function inspectExpression(expression) {
+  if (inspectionCache.has(expression)) return inspectionCache.get(expression);
+  const result = await requestWorker("inspect", { expression });
+  if (result) inspectionCache.set(expression, result);
+  return result;
+}
+
+async function completeExpression(expression, prefix) {
+  const key = `${expression}\u0000${prefix}`;
+  if (completionCache.has(key)) return completionCache.get(key);
+  const result = await requestWorker("complete", { expression, prefix });
+  const members = Array.isArray(result) ? result : [];
+  completionCache.set(key, members);
+  return members;
+}
+
+async function completionSource(context) {
+  const token = context.matchBefore(/[A-Za-z_][\w.]*/);
+  if (!token) {
+    return context.explicit ? { from: context.pos, options: COMMON_COMPLETIONS } : null;
+  }
+  if (!context.explicit && token.from === token.to) return null;
+
+  const lastDot = token.text.lastIndexOf(".");
+  if (lastDot < 0 || !runtimeReady || running) {
+    return {
+      from: token.from,
+      options: COMMON_COMPLETIONS,
+      validFor: /^[\w.]*$/,
+    };
+  }
+
+  const expression = token.text.slice(0, lastDot);
+  const prefix = token.text.slice(lastDot + 1);
+  const members = await completeExpression(expression, prefix);
+  return {
+    from: token.from + lastDot + 1,
+    options: members.map((member) => ({
+      label: member.name,
+      type: member.kind,
+      detail: member.signature || member.module || "",
+      info: member.documentation || undefined,
+    })),
+    validFor: /^\w*$/,
+  };
+}
+
+function symbolAt(state, position) {
+  const line = state.doc.lineAt(position);
+  const offset = position - line.from;
+  let start = offset;
+  let end = offset;
+  while (start > 0 && /[\w.]/.test(line.text[start - 1])) start -= 1;
+  while (end < line.text.length && /[\w.]/.test(line.text[end])) end += 1;
+  const symbol = line.text.slice(start, end).replace(/^\.+|\.+$/g, "");
+  if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(symbol)) return null;
+  return { symbol, from: line.from + start, to: line.from + end };
+}
+
+function documentationUrl(result) {
+  if (result.symbol.startsWith("torch")) {
+    return `https://pytorch.org/docs/stable/generated/${encodeURIComponent(result.symbol)}.html`;
+  }
+  if (result.module === "builtins") {
+    return `https://docs.python.org/3/library/functions.html#${encodeURIComponent(result.symbol)}`;
+  }
+  if (result.module && !result.module.startsWith("__")) {
+    return `https://docs.python.org/3/library/${encodeURIComponent(result.module)}.html`;
+  }
+  return null;
+}
+
+function createDocumentationDOM(result) {
+  const container = document.createElement("div");
+  container.className = "cm-doc-tooltip";
+
+  const symbol = document.createElement("strong");
+  symbol.textContent = result.symbol;
+  container.append(symbol);
+
+  if (result.signature) {
+    const signature = document.createElement("code");
+    signature.textContent = result.signature;
+    container.append(signature);
+  }
+
+  if (result.documentation) {
+    const documentation = document.createElement("p");
+    documentation.textContent = result.documentation;
+    container.append(documentation);
+  }
+
+  const url = documentationUrl(result);
+  if (url) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = result.symbol.startsWith("torch") ? "PyTorch documentation" : "Python documentation";
+    container.append(link);
+  }
+
+  return container;
+}
+
+const documentationTooltip = hoverTooltip(
+  async (view, position) => {
+    const target = symbolAt(view.state, position);
+    if (!target) return null;
+    const fallback = STATIC_DOCUMENTATION.get(target.symbol);
+    const result = runtimeReady && !running ? await inspectExpression(target.symbol) : fallback;
+    if (!result && !fallback) return null;
+    const documentation = result ?? fallback;
+    return {
+      pos: target.from,
+      end: target.to,
+      above: true,
+      create: () => ({ dom: createDocumentationDOM(documentation) }),
+    };
+  },
+  { hoverTime: 350 },
+);
+
 const editor = new EditorView({
   state: EditorState.create({
     doc: EXAMPLES.autograd.code,
     extensions: [
       basicSetup,
       python(),
-      pythonLanguage.data.of({ autocomplete: TORCH_COMPLETIONS }),
+      pythonLanguage.data.of({ autocomplete: completionSource }),
+      documentationTooltip,
       oneDark,
       Prec.high(
         keymap.of([
+          { key: "Tab", run: acceptCompletion },
           indentWithTab,
           { key: "Mod-Enter", run: runShortcut },
           { key: "Shift-Enter", run: runShortcut },
@@ -281,6 +470,15 @@ function handleWorkerMessage(event) {
     case "stderr":
       appendOutput(`${message.text}\n`, "error");
       break;
+    case "request-result": {
+      const request = pendingWorkerRequests.get(message.id);
+      if (request) {
+        window.clearTimeout(request.timeout);
+        pendingWorkerRequests.delete(message.id);
+        request.resolve(message.result ?? null);
+      }
+      break;
+    }
     case "ready":
       runtimeReady = true;
       running = false;
@@ -308,12 +506,15 @@ function handleWorkerMessage(event) {
       break;
     case "run-finished":
       running = false;
+      inspectionCache.clear();
+      completionCache.clear();
       setControls();
       setExecutionState("idle");
       break;
     case "fatal":
       runtimeReady = false;
       running = false;
+      clearWorkerRequests();
       setControls();
       setExecutionState("failed", "error");
       setStatus("Runtime failed", "Use Restart runtime to try again.", "release", "error");
@@ -324,6 +525,7 @@ function handleWorkerMessage(event) {
 
 function startWorker(release) {
   runtimeWorker?.terminate();
+  clearWorkerRequests();
   runtimeReady = false;
   running = false;
   setControls();
@@ -334,6 +536,36 @@ function startWorker(release) {
     handleWorkerMessage({ data: { type: "fatal", error: event.message || "Web Worker failed." } });
   });
   runtimeWorker.postMessage({ type: "init", config: release });
+}
+
+async function initializeAssetCache() {
+  if (!("serviceWorker" in navigator) || !("caches" in window)) {
+    elements.cacheValue.textContent = "unavailable";
+    elements.clearCache.disabled = true;
+    return;
+  }
+  try {
+    await navigator.serviceWorker.register("./service-worker.js");
+    await navigator.serviceWorker.ready;
+    elements.cacheValue.textContent = "enabled";
+    elements.clearCache.disabled = false;
+  } catch (error) {
+    console.warn("Playground cache initialization failed", error);
+    elements.cacheValue.textContent = "unavailable";
+    elements.clearCache.disabled = true;
+  }
+}
+
+async function clearAssetCache() {
+  if (!("caches" in window)) return;
+  elements.clearCache.disabled = true;
+  const keys = await caches.keys();
+  await Promise.all(keys.filter((key) => key.startsWith(CACHE_PREFIX)).map((key) => caches.delete(key)));
+  elements.cacheValue.textContent = "cleared";
+  window.setTimeout(() => {
+    elements.cacheValue.textContent = "enabled";
+    elements.clearCache.disabled = false;
+  }, 1200);
 }
 
 async function bootstrap() {
@@ -354,6 +586,9 @@ async function bootstrap() {
 
 function runPython() {
   if (!runtimeReady || running || !runtimeWorker) return;
+  running = true;
+  setControls();
+  setExecutionState("running", "running");
   clearOutput();
   appendOutput(`$ python ${currentExample().filename}\n`, "meta");
   runtimeWorker.postMessage({ type: "run", code: editor.state.doc.toString() });
@@ -373,6 +608,7 @@ function stopExecution() {
   runtimeWorker = null;
   running = false;
   runtimeReady = false;
+  clearWorkerRequests();
   clearOutput();
   appendOutput("Execution stopped. Restarting Pyodide…\n", "error");
   setStatus("Restarting runtime", "The previous worker was terminated.", "pyodide");
@@ -382,6 +618,7 @@ function stopExecution() {
 elements.run.addEventListener("click", runPython);
 elements.stop.addEventListener("click", stopExecution);
 elements.restart.addEventListener("click", restartRuntime);
+elements.clearCache.addEventListener("click", clearAssetCache);
 elements.clear.addEventListener("click", clearOutput);
 elements.resetCode.addEventListener("click", () => {
   replaceEditorText(currentExample().code);
@@ -402,4 +639,4 @@ elements.copy.addEventListener("click", async () => {
   }, 1200);
 });
 
-bootstrap();
+initializeAssetCache().finally(bootstrap);
