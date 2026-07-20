@@ -107,7 +107,7 @@ for setter in (torch.set_num_threads, torch.set_num_interop_threads):
 for setter in (torch.set_num_threads, torch.set_num_interop_threads):
     try:
         setter(2**65)
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass
     else:
         raise AssertionError(f"{setter.__name__}(2**65) unexpectedly succeeded")
