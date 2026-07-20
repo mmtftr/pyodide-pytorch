@@ -10,10 +10,15 @@ torch._C or generated version metadata.
 
 Fail configuration instead of silently building LibTorch if the target Python
 headers are ever rejected again.
+
+FindPython also leaves the target SOABI empty while cross-compiling, so CMake
+names the extension _C.so even when WITH_SOABI is requested. Package that exact
+generic filename for Pyodide, whose extension loader supports the .so suffix.
 ---
  cmake/Dependencies.cmake     |  5 +++++
+ setup.py                     | 16 ++++++++++++++--
  tools/setup_helpers/cmake.py | 12 ++++++++++++
- 2 files changed, 17 insertions(+)
+ 3 files changed, 31 insertions(+), 2 deletions(-)
 
 diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
 index 2baa187..7353e7f 100644
@@ -31,6 +36,38 @@ index 2baa187..7353e7f 100644
      message(WARNING "Python dependencies not met. Not compiling with python. Suppress this warning with -DBUILD_PYTHON=OFF")
      caffe2_update_option(BUILD_PYTHON OFF)
    endif()
+diff --git a/setup.py b/setup.py
+index bcadb7a..14d9fa3 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1169,13 +1169,25 @@ def main() -> None:
+     ) = configure_extension_build()
+     install_requires += extra_install_requires
+ 
++    torch_c_extension = f"_C{sysconfig.get_config_var('EXT_SUFFIX')}"
++    if os.getenv("PYODIDE_PYTHON_INCLUDE_DIR"):
++        # FindPython cannot infer the target SOABI while cross-compiling, so
++        # Python_add_library(... WITH_SOABI) emits the generic _C.so name.
++        # Pyodide's extension loader accepts that generic suffix.
++        torch_c_extension = "_C.so"
++        extension_path = TORCH_DIR / torch_c_extension
++        if RUN_BUILD_DEPS and not extension_path.is_file():
++            raise RuntimeError(
++                f"CMake did not install the Pyodide extension: {extension_path}"
++            )
++
+     torch_package_data = [
+         "py.typed",
+         # torch._C is built by CMake (torch/CMakeLists.txt) and installed into
+-        # torch/.  Match this interpreter's exact extension suffix, not a glob:
++        # torch/. Match its exact output name, not a glob:
+         # build_all.sh reuses one build/ dir across Python versions, so a glob
+         # would also pick up other ABIs' _C modules left behind in the tree.
+-        f"_C{sysconfig.get_config_var('EXT_SUFFIX')}",
++        torch_c_extension,
+         "bin/*",
+         "bin/**/*",
+         "test/*",
 diff --git a/tools/setup_helpers/cmake.py b/tools/setup_helpers/cmake.py
 index da48473..e655307 100644
 --- a/tools/setup_helpers/cmake.py
@@ -56,4 +93,3 @@ index da48473..e655307 100644
          if use_numpy:
 -- 
 2.51.1
-
