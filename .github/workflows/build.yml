@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Check out build repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Publish pending build status
         env:
@@ -74,7 +74,7 @@ jobs:
           fi
 
       - name: Check out pinned PyTorch source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: pytorch/pytorch
           ref: ${{ steps.config.outputs.pytorch_ref }}
@@ -87,13 +87,13 @@ jobs:
         run: scripts/apply_patches.sh pytorch
 
       - name: Set up host Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ steps.config.outputs.python_version }}
 
       - name: Restore Pyodide cross-build environment
         id: xbuildenv-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .pyodide-xbuildenv
           key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
@@ -119,14 +119,14 @@ jobs:
 
       - name: Save Pyodide cross-build environment
         if: steps.xbuildenv-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .pyodide-xbuildenv
           key: xbuildenv-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.config.outputs.python_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}-build-${{ steps.config.outputs.pyodide_build_version }}
 
       - name: Restore compiler cache
         id: ccache-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Restore native protoc cache
         id: protoc-restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
           key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
@@ -163,13 +163,13 @@ jobs:
 
       - name: Save native protoc cache
         if: steps.protoc-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/pytorch-host-protobuf
           key: host-protoc-ubuntu-24.04-${{ runner.arch }}-cmake-${{ steps.config.outputs.cmake_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('scripts/build_host_protoc.sh') }}
 
       - name: Set up pinned Emscripten
-        uses: mymindstorm/setup-emsdk@v14
+        uses: emscripten-core/setup-emsdk@v16
         with:
           version: ${{ steps.config.outputs.emscripten_version }}
           actions-cache-folder: emsdk-cache
@@ -213,7 +213,7 @@ jobs:
       - name: Save compiler cache
         if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -243,7 +243,7 @@ jobs:
           echo "name=$(basename "${wheels[0]}")" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -257,7 +257,7 @@ jobs:
 
       - name: Upload unverified wheel after validation or smoke failure
         if: ${{ failure() && steps.wheel.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unverified-torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: |
@@ -268,7 +268,7 @@ jobs:
           compression-level: 0
 
       - name: Upload wheel and provenance
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: wheelhouse/dist/*
@@ -281,7 +281,7 @@ jobs:
         # repositories. Release publication must not discard an otherwise
         # verified wheel; attestations become mandatory once the repo is public.
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             wheelhouse/dist/*.whl
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload CMake diagnostics after failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cmake-diagnostics-${{ github.run_id }}
           path: |

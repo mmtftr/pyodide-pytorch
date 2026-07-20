@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out release repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -134,7 +134,7 @@ jobs:
           echo "head_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Download verified wheel artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: wheelhouse/dist
@@ -155,7 +155,7 @@ jobs:
           echo "path=${wheels[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -169,7 +169,7 @@ jobs:
 
       - name: Attest wheel provenance
         if: github.event.repository.visibility == 'public'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             wheelhouse/dist/*.whl
