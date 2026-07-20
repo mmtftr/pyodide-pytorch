@@ -197,6 +197,11 @@ runtime and 25 MB PyTorch wheel again on a compatible subsequent visit. The
 **Clear cache** control removes only caches owned by this playground. Browser
 storage quotas and eviction policies still apply.
 
+The HTML entry point uses an explicit frontend asset version for the bundled
+editor, worker, and service worker. Change that version and the shell cache name
+when those files require a cache-breaking deployment. Runtime wheels do not
+need this manual version because their release filenames are immutable.
+
 The ABI-specific cache keys include the relevant PyTorch, Pyodide, Python,
 Emscripten, build-tool, configuration, patch, and build-script inputs. Compiler
 cache restore keys omit the workflow run identifier so a compatible previous

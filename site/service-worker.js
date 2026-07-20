@@ -1,7 +1,13 @@
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const SHELL_CACHE = `${CACHE_PREFIX}shell-v1`;
+const SHELL_CACHE = `${CACHE_PREFIX}shell-v2`;
 const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v1`;
-const SHELL_ASSETS = ["./", "./index.html", "./styles.css", "./app.js", "./worker.js"];
+const SHELL_ASSETS = [
+  "./",
+  "./index.html",
+  "./styles.css",
+  "./app.js?v=2",
+  "./worker.js?v=2",
+];
 
 async function put(cacheName, request, response) {
   if (!response || (response.status !== 200 && response.type !== "opaque")) return response;
