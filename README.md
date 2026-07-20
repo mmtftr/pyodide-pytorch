@@ -7,11 +7,10 @@ WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
 > [!IMPORTANT]
 > The pinned upgrade target is PyTorch `cf30153` (`2.13.0`) on Pyodide
 > `314.0.2`, CPython `3.14.2`, and Emscripten `5.0.3`.
-> At this revision, only applicability of the ordered patch series to the exact
-> PyTorch source has been validated. Wheel compatibility is not established
-> until the canonical CI full build, binary validation, and Pyodide smoke test
-> pass for this exact commit. Wheels are ABI-specific and must be used with the
-> exact Pyodide version named by the release.
+> Release assets are published only after the canonical CI full build, binary
+> validation, and Pyodide smoke test pass for the exact source commit. Wheels
+> are ABI-specific and must be used with the exact Pyodide version named by the
+> release.
 
 ## What this repository provides
 
@@ -136,6 +135,11 @@ The pipeline performs these steps:
    memory, atomics feature, missing dependency, unresolved project symbol, or
    oversized wheel.
 8. Imports the wheel in the pinned Pyodide runtime and runs the smoke suite.
+
+The workflow keeps `PYODIDE_XBUILDENV_PATH` stable and caches the cross-build
+environment by Python, Pyodide, and `pyodide-build` version. Emscripten, native
+`protoc`, and compiler outputs use separate ABI-scoped caches. Runtime tests use
+Node.js 24, matching the current `pyodide-build` recommendation.
 
 Fast local repository checks do not require a PyTorch checkout:
 
