@@ -134,12 +134,12 @@ def wasm_uses_shared_memory(data: bytes) -> bool:
     return False
 
 
-def wasm_dynamic_libraries(data: bytes) -> list[str]:
-    """Return DT_NEEDED-style entries from Emscripten's dylink.0 section."""
+def wasm_dylink_strings(data: bytes, requested_subsection: int) -> list[str]:
+    """Return strings from a counted-string dylink.0 subsection."""
     if not data.startswith(b"\0asm\x01\0\0\0"):
         raise WasmFormatError("invalid WebAssembly magic or version")
     module = Reader(data, 8)
-    libraries: list[str] = []
+    values: list[str] = []
     while module.position < len(module.data):
         section_id = module.byte()
         payload = Reader(module.take(module.uleb()))
@@ -153,12 +153,24 @@ def wasm_dynamic_libraries(data: bytes) -> list[str]:
         while payload.position < len(payload.data):
             subsection_type = payload.uleb()
             subsection = Reader(payload.take(payload.uleb()))
-            if subsection_type != 2:
+            if subsection_type != requested_subsection:
                 continue
-            libraries.extend(subsection.string() for _ in range(subsection.uleb()))
+            values.extend(subsection.string() for _ in range(subsection.uleb()))
             if subsection.position != len(subsection.data):
-                raise WasmFormatError("trailing data in dylink.0 needed subsection")
-    return libraries
+                raise WasmFormatError(
+                    f"trailing data in dylink.0 subsection {requested_subsection}"
+                )
+    return values
+
+
+def wasm_dynamic_libraries(data: bytes) -> list[str]:
+    """Return DT_NEEDED-style entries from Emscripten's dylink.0 section."""
+    return wasm_dylink_strings(data, 2)
+
+
+def wasm_runtime_paths(data: bytes) -> list[str]:
+    """Return runtime search paths from Emscripten's dylink.0 section."""
+    return wasm_dylink_strings(data, 5)
 
 
 def wasm_imports(data: bytes) -> list[tuple[str, str, int]]:
@@ -326,16 +338,51 @@ def validate(path: Path) -> dict[str, object]:
             )
 
         extensions = sorted(name for name in names if name.endswith(".so"))
-        if len(extensions) != 1 or not extensions[0].startswith("torch/_C."):
-            raise ValueError(f"expected only the torch._C extension, found {extensions}")
-        extension_data = wheel.read(extensions[0])
-        if wasm_uses_shared_memory(extension_data):
-            raise ValueError("torch._C uses shared memory or the WebAssembly atomics feature")
-        dynamic_libraries = wasm_dynamic_libraries(extension_data)
-        if dynamic_libraries:
+        torch_extensions = [
+            name for name in extensions if name.startswith("torch/_C.")
+        ]
+        lapack_path = f"torch.libs/{values['LAPACK_LIBRARY']}"
+        expected_extensions = sorted([*torch_extensions, lapack_path])
+        if len(torch_extensions) != 1 or extensions != expected_extensions:
             raise ValueError(
-                "torch._C is not self-contained; dynamic libraries: "
+                "expected torch._C and the vendored LAPACK library, "
+                f"found {extensions}"
+            )
+        extension_data = wheel.read(torch_extensions[0])
+        lapack_data = wheel.read(lapack_path)
+        for module_name, module_data in (
+            (torch_extensions[0], extension_data),
+            (lapack_path, lapack_data),
+        ):
+            if wasm_uses_shared_memory(module_data):
+                raise ValueError(
+                    f"{module_name} uses shared memory or the WebAssembly atomics feature"
+                )
+        dynamic_libraries = wasm_dynamic_libraries(extension_data)
+        if dynamic_libraries != [values["LAPACK_LIBRARY"]]:
+            raise ValueError(
+                "torch._C must depend only on the vendored LAPACK library; "
+                "dynamic libraries: "
                 + ", ".join(dynamic_libraries)
+            )
+        lapack_dynamic_libraries = wasm_dynamic_libraries(lapack_data)
+        if lapack_dynamic_libraries:
+            raise ValueError(
+                "vendored LAPACK has unexpected dynamic libraries: "
+                + ", ".join(lapack_dynamic_libraries)
+            )
+        runtime_paths = wasm_runtime_paths(extension_data)
+        expected_runtime_path = "$ORIGIN/../torch.libs"
+        if expected_runtime_path not in runtime_paths:
+            raise ValueError(
+                f"torch._C runtime paths are missing {expected_runtime_path}: "
+                + ", ".join(runtime_paths)
+            )
+        lapack_runtime_paths = wasm_runtime_paths(lapack_data)
+        if "$ORIGIN" not in lapack_runtime_paths:
+            raise ValueError(
+                "vendored LAPACK runtime paths are missing $ORIGIN: "
+                + ", ".join(lapack_runtime_paths)
             )
         unresolved_project_symbols = wasm_unresolved_project_symbols(extension_data)
         if unresolved_project_symbols:
@@ -352,6 +399,12 @@ def validate(path: Path) -> dict[str, object]:
         "tag": expected_tag,
         "extensions": extensions,
         "dynamic_libraries": dynamic_libraries,
+        "runtime_paths": runtime_paths,
+        "lapack": {
+            "path": lapack_path,
+            "dynamic_libraries": lapack_dynamic_libraries,
+            "runtime_paths": lapack_runtime_paths,
+        },
         "unresolved_project_symbols": unresolved_project_symbols,
         "threading": "single",
         "shared_memory": False,
