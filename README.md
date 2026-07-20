@@ -15,7 +15,8 @@ inside the matching Pyodide runtime before release.
 | Python | `3.14.2` / `cp314` |
 | Emscripten | `5.0.3` |
 | Platform tag | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r1` |
+| LAPACK | Pyodide `libopenblas` `0.3.28` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r2` |
 
 All ABI-relevant versions are defined in [`config/build.toml`](config/build.toml).
 The wheel must be loaded with the Pyodide version recorded in its release
@@ -33,9 +34,13 @@ The current build has the following constraints:
 - Intra-op, inter-op, and CPU autograd callbacks execute synchronously on the
   Pyodide worker thread.
 - Filesystem-backed multiprocessing storage is not included.
+- Eigen provides the CPU BLAS implementation. The wheel vendors the matching
+  Pyodide `libopenblas.so` side module for LAPACK-backed `torch.linalg`
+  operations.
 
 The patch set keeps the Python bindings and statically links the required
-libtorch components into the `torch._C` Pyodide side module.
+libtorch components into the `torch._C` Pyodide side module. `torch._C` has one
+dynamic dependency, the vendored `torch.libs/libopenblas.so` LAPACK module.
 
 ## Release artifacts
 
@@ -149,8 +154,10 @@ The build performs these operations:
    the configured CPU-only feature flags.
 7. Remove headers, static archives, command-line programs, and other build-only
    payloads from the raw wheel.
-8. Rewrite wheel `RECORD` hashes and produce deterministic archive metadata.
-9. Validate the wheel and run the Pyodide runtime tests.
+8. Use `pyodide auditwheel repair` to vendor the pinned Pyodide
+   `libopenblas.so` and set the WebAssembly runtime search path.
+9. Rewrite wheel `RECORD` hashes and produce deterministic archive metadata.
+10. Validate the wheel and run the Pyodide runtime tests.
 
 The patch series is stored in `patches/pytorch/`. It contains the Pyodide
 cross-build changes, single-threaded ATen and autograd implementation, static
@@ -167,11 +174,13 @@ fixes required by the pinned source revision.
 - Required runtime files.
 - Absence of static archives and other build-only files.
 - Absence of shared memory and the atomics target feature.
-- Dynamic dependencies and unresolved PyTorch-owned symbols.
+- The exact `libopenblas.so` dynamic dependency and its vendored runtime path.
+- Unresolved PyTorch-owned symbols.
 - The configured maximum wheel size.
 
 [`tests/smoke.mjs`](tests/smoke.mjs) imports the wheel in the pinned Pyodide
-runtime and covers tensor operations, autograd, `torch.nn`, an optimizer step,
+runtime and covers tensor operations, autograd, LAPACK-backed inverse, solve,
+eigenvalue, and Cholesky operations, `torch.nn`, an optimizer step,
 serialization, and `torch.func`.
 
 Fast repository validation checks configuration parsing, patch syntax, helper
@@ -186,6 +195,7 @@ GitHub Actions uses separate caches for:
 - The Pyodide cross-build environment.
 - Emscripten.
 - The native protobuf compiler.
+- The pinned Pyodide `libopenblas` package archive.
 - `ccache` compiler output.
 - Playground npm packages.
 
@@ -215,6 +225,7 @@ build can be reused; the saved key remains unique per run attempt.
 | `config/build-constraints.txt` | Python build dependency constraints |
 | `patches/pytorch/` | Ordered patches applied to the pinned PyTorch source |
 | `scripts/build_wheel.sh` | PyTorch and `pyodide-build` entry point |
+| `scripts/fetch_lapack.py` | Pinned Pyodide LAPACK download and verification |
 | `scripts/postprocess_wheel.py` | Deterministic pruning and repacking |
 | `scripts/validate_wheel.py` | Wheel and WebAssembly validation |
 | `scripts/verify_release_artifact.py` | Release checksum, manifest, and input verification |
