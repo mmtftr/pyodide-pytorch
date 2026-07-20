@@ -100,10 +100,11 @@ also works.
 ## Browser playground
 
 Open the [PyTorch for Pyodide playground](https://mmtftr.github.io/pyodide-pytorch/)
-to run editable Python examples entirely in the browser. The page resolves the
-latest published GitHub Release, validates its build manifest, selects the
-matching Pyodide runtime, and runs PyTorch in a module Web Worker so the page
-stays responsive.
+to run editable Python examples entirely in the browser. Each deployment
+downloads and revalidates the latest published GitHub Release, serves the wheel
+from the same Pages origin, selects the matching Pyodide runtime, and runs
+PyTorch in a module Web Worker so the page stays responsive. Publishing a new
+release automatically refreshes the deployed playground.
 
 ## Build
 
