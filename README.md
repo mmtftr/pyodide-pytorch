@@ -1,73 +1,66 @@
 # PyTorch for Pyodide
 
-Reproducible, unofficial, CPU-only PyTorch wheels for Pyodide. The build is
-deliberately single-threaded: it does not enable Emscripten pthreads or
-WebAssembly shared memory, and ATen executes intra-op and inter-op work inline.
+This repository builds an unofficial, CPU-only PyTorch wheel for Pyodide. The
+wheel is compiled as WebAssembly, uses Pyodide's platform ABI, and is validated
+inside the matching Pyodide runtime before release.
 
-> [!IMPORTANT]
-> The pinned upgrade target is PyTorch `cf30153` (`2.13.0`) on Pyodide
-> `314.0.2`, CPython `3.14.2`, and Emscripten `5.0.3`.
-> Release assets are published only after the canonical CI full build, binary
-> validation, and Pyodide smoke test pass for the exact source commit. Wheels
-> are ABI-specific and must be used with the exact Pyodide version named by the
-> release.
+## Current build target
 
-## What this repository provides
-
-- One reviewed manifest, [`config/build.toml`](config/build.toml), pinning every
-  ABI-relevant input.
-- Small, ordered `git apply` patches instead of a long-lived PyTorch fork.
-- A native `protoc` bootstrap built from PyTorch's own pinned protobuf
-  submodule, so cross-compilation never executes a target Wasm binary.
-- Static libtorch linking into a single Pyodide side module.
-- Deterministic post-processing that removes headers, static archives, command
-  line tools, and other build-only payloads.
-- Binary validation of the wheel tag, RECORD hashes, WebAssembly magic,
-  target features, non-shared memory, dynamic dependencies, and unresolved
-  PyTorch-owned symbols.
-- A real Pyodide/Node smoke test covering tensor operations, autograd,
-  `torch.nn`, an optimizer step, serialization, and `torch.func`.
-- Release SHA-256 files and a machine-readable input manifest. Public
-  repositories also receive GitHub artifact attestations. Generated wheels are
-  release assets, never Git objects.
-
-The earlier wheel shared in
-[`mat3ra/api-examples#286`](https://github.com/mat3ra/api-examples/pull/286)
-was useful as a behavioral reference, but it has no reproducible build recipe.
-This repository does not copy or republish that binary.
-
-## Threading model
-
-Turning off OpenMP and optimized CPU backends is not sufficient by itself:
-PyTorch's native ATen schedulers can still construct `std::thread` pools. The
-patch set therefore makes the constraint explicit:
-
-| Layer | Enforcement |
+| Component | Version |
 | --- | --- |
-| Build | No `-pthread`; OpenMP, NNPACK/QNNPACK/XNNPACK, FBGEMM, MKL, MKLDNN, distributed, and accelerator backends are off. |
-| ATen | `get_num_threads()` and `get_num_interop_threads()` return `1`; attempts to set either to another value fail. |
-| Scheduling | Intra-op and inter-op callbacks execute synchronously on the current thread. |
-| Autograd | CPU autograd stays on the calling thread, including re-entrant execution. |
-| Artifact | Validation rejects shared Wasm memory and the `atomics` target feature. |
+| PyTorch | `cf30153c4c131c8164ee7798e5022d810682e2cb` (`2.13.0`) |
+| Wheel version | `2.13.0+pyodide314.0.2` |
+| Pyodide runtime | `314.0.2` |
+| `pyodide-build` | `0.36.0` |
+| Python | `3.14.2` / `cp314` |
+| Emscripten | `5.0.3` |
+| Platform tag | `pyemscripten_2026_0_wasm32` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r1` |
 
-Some libc and C++ standard-library pthread symbol names can remain in dead or
-stubbed code. The meaningful Wasm invariant is that the module neither imports
-shared memory nor opts into atomics, and no runtime path creates a worker.
-Filesystem-backed multiprocessing storage is explicitly unsupported: its
-fork/socket manager is omitted, while unrelated storage weak-reference APIs
-remain available.
+All ABI-relevant versions are defined in [`config/build.toml`](config/build.toml).
+The wheel must be loaded with the Pyodide version recorded in its release
+manifest.
 
-## Use a release wheel
+## Supported configuration
 
-Host the wheel on a CORS-enabled origin, then load it into the matching
-Pyodide runtime. `loadPackage()` does not resolve arbitrary wheel dependencies,
-so load the packages explicitly:
+The current build has the following constraints:
+
+- CPU execution only.
+- One intra-op thread and one inter-op thread.
+- No Emscripten pthreads, WebAssembly shared memory, or atomics target feature.
+- No OpenMP, MKL, MKLDNN, FBGEMM, XNNPACK, QNNPACK, NNPACK, distributed, CUDA,
+  ROCm, or other accelerator backends.
+- Intra-op, inter-op, and CPU autograd callbacks execute synchronously on the
+  Pyodide worker thread.
+- Filesystem-backed multiprocessing storage is not included.
+
+The patch set keeps the Python bindings and statically links the required
+libtorch components into the `torch._C` Pyodide side module.
+
+## Release artifacts
+
+Each release contains:
+
+- The PyTorch wheel.
+- A SHA-256 file for the wheel.
+- `build-manifest.json`, containing the build configuration, source commit,
+  input hashes, wheel filename, wheel size, and wheel digest.
+- A GitHub artifact attestation when the repository configuration supports it.
+
+The release workflow revalidates downloaded artifacts before publication and
+does not overwrite existing releases.
+
+## Loading the wheel
+
+Host the wheel on an origin that allows browser requests, load the dependencies
+that Pyodide already packages, install `filelock`, and then load the wheel:
 
 ```html
 <script type="module">
   import { loadPyodide } from "https://cdn.jsdelivr.net/pyodide/v314.0.2/full/pyodide.mjs";
 
   const pyodide = await loadPyodide();
+
   await pyodide.loadPackage([
     "micropip",
     "numpy",
@@ -77,120 +70,178 @@ so load the packages explicitly:
     "jinja2",
     "fsspec",
   ]);
+
   await pyodide.runPythonAsync(`
     import micropip
     await micropip.install("filelock")
   `);
+
   await pyodide.loadPackage("https://your-origin.example/torch-...whl");
 
   await pyodide.runPythonAsync(`
     import torch
+
     x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
     x.square().sum().backward()
-    print(torch.__version__, x.grad)
+    print(torch.__version__)
+    print(x.grad)
   `);
 </script>
 ```
 
-Verify the release checksum before deploying the wheel. The wheel uses
-Pyodide's standardized `pyemscripten_2026_0_wasm32` platform tag. This
-repository publishes it through GitHub Releases; a CORS-enabled static origin
-also works.
+Verify the wheel against the published SHA-256 value before deploying it to a
+static origin.
 
 ## Browser playground
 
-Open the [PyTorch for Pyodide playground](https://mmtftr.github.io/pyodide-pytorch/)
-to run editable Python examples entirely in the browser. Each deployment
-downloads and revalidates the latest published GitHub Release, serves the wheel
-from the same Pages origin, selects the matching Pyodide runtime, and runs
-PyTorch in a module Web Worker so the page stays responsive. Publishing a new
-release automatically refreshes the deployed playground.
+The [browser playground](https://mmtftr.github.io/pyodide-pytorch/) contains a
+CodeMirror Python editor and a separate output console. It supports Python
+syntax highlighting, editor key bindings, completion for commonly used
+`torch` names, example programs, code reset and copy controls, runtime restart,
+and cancellation by terminating the worker.
 
-## Build
+The playground implementation is split into:
 
-The GitHub Actions workflow is the canonical build environment. Run **Build
-PyTorch wheel** with `workflow_dispatch`, or push a change to an ABI-relevant
-path on `main`. The accepted release name is pinned in `config/build.toml`; a
-matching tag builds, tests, attests when supported, and publishes the assets.
-Automation that cannot create tags may instead create `release/<release-tag>`
-directly at the current `main` commit. After the same build and tests pass, the
-workflow creates the corresponding tag and release. This branch trigger is
-one-shot: updating an existing release branch never republishes it.
+- `site/app.js`: editor state, controls, release-manifest loading, and worker
+  message handling.
+- `site/worker.js`: Pyodide initialization, package loading, runtime validation,
+  Python execution, stdout, and stderr forwarding.
+- `site/index.html` and `site/styles.css`: application layout and styling.
 
-GitHub does not support artifact attestations for user-owned private
-repositories. In that case the attestation step is skipped; checksum, binary,
-and runtime validation still gate publication. If a release build uploads a
-verified artifact but a later publication step fails, run **Publish verified
-release artifact** with the source run ID. Automation without workflow-dispatch
-access may create `publish/<run-id>` at current `main`. The recovery workflow
-checks the source run and every critical build step, revalidates the artifact
-and manifest against the current pins, reruns the Pyodide smoke test, and
-refuses to overwrite an existing release. A retry can use
-`publish/<run-id>-retry-<number>`; each run reports its URL through the
-`pytorch-pyodide/release` commit status.
+The Pages workflow downloads the current release artifacts, verifies them with
+[`scripts/verify_release_artifact.py`](scripts/verify_release_artifact.py), and
+places the wheel beside the static application. The browser therefore loads the
+wheel from the same origin as the playground. Publishing or recovering a
+release triggers a new Pages deployment.
 
-The pipeline performs these steps:
+## Build implementation
 
-1. Checks out the exact PyTorch commit and its recursively pinned submodules.
-2. Verifies every patch with `git apply --check`, then applies it in lexical
+The build performs these operations:
+
+1. Read and validate `config/build.toml`.
+2. Check out the pinned PyTorch commit and recursive submodules.
+3. Check every patch with `git apply --check` and apply the patches in filename
    order.
-3. Builds a host `protoc` from the matching protobuf submodule.
-4. Installs the pinned `pyodide-build` and Emscripten toolchains.
-5. Runs `pyodide build --skip-emscripten-install --exports=whole_archive` with
-   the CPU-only feature set and the separately pinned Emscripten installation.
-6. Prunes build-time payloads and rewrites wheel RECORD hashes
-   deterministically.
-7. Rejects an ABI mismatch, native/non-Wasm `.so`, static archive, shared
-   memory, atomics feature, missing dependency, unresolved project symbol, or
-   oversized wheel.
-8. Imports the wheel in the pinned Pyodide runtime and runs the smoke suite.
+4. Build a native `protoc` from PyTorch's pinned protobuf submodule so the
+   cross-build never attempts to execute a WebAssembly target binary.
+5. Install the pinned Emscripten and `pyodide-build` toolchains.
+6. Run `pyodide build --skip-emscripten-install --exports=whole_archive` with
+   the configured CPU-only feature flags.
+7. Remove headers, static archives, command-line programs, and other build-only
+   payloads from the raw wheel.
+8. Rewrite wheel `RECORD` hashes and produce deterministic archive metadata.
+9. Validate the wheel and run the Pyodide runtime tests.
 
-The workflow keeps `PYODIDE_XBUILDENV_PATH` stable and caches the cross-build
-environment by Python, Pyodide, and `pyodide-build` version. Emscripten, native
-`protoc`, and compiler outputs use separate ABI-scoped caches. Runtime tests use
-Node.js 24, matching the current `pyodide-build` recommendation.
+The patch series is stored in `patches/pytorch/`. It contains the Pyodide
+cross-build changes, single-threaded ATen and autograd implementation, static
+linking changes, unsupported multiprocessing exclusions, and Emscripten build
+fixes required by the pinned source revision.
 
-Fast local repository checks do not require a PyTorch checkout:
+## Validation
+
+[`scripts/validate_wheel.py`](scripts/validate_wheel.py) checks:
+
+- The Python and Pyodide platform tags.
+- Wheel metadata and `RECORD` hashes.
+- WebAssembly magic and dynamic-library structure.
+- Required runtime files.
+- Absence of static archives and other build-only files.
+- Absence of shared memory and the atomics target feature.
+- Dynamic dependencies and unresolved PyTorch-owned symbols.
+- The configured maximum wheel size.
+
+[`tests/smoke.mjs`](tests/smoke.mjs) imports the wheel in the pinned Pyodide
+runtime and covers tensor operations, autograd, `torch.nn`, an optimizer step,
+serialization, and `torch.func`.
+
+Fast repository validation checks configuration parsing, patch syntax, helper
+scripts, artifact verification, packaging, and WebAssembly inspection. Patch
+applicability is also tested against the exact pinned PyTorch commit without
+running the full build.
+
+## Build cache
+
+GitHub Actions uses separate caches for:
+
+- The Pyodide cross-build environment.
+- Emscripten.
+- The native protobuf compiler.
+- `ccache` compiler output.
+- Playground npm packages.
+
+The ABI-specific cache keys include the relevant PyTorch, Pyodide, Python,
+Emscripten, build-tool, configuration, patch, and build-script inputs. Compiler
+cache restore keys omit the workflow run identifier so a compatible previous
+build can be reused; the saved key remains unique per run attempt.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `config/build.toml` | Build, ABI, toolchain, and release pins |
+| `config/build-constraints.txt` | Python build dependency constraints |
+| `patches/pytorch/` | Ordered patches applied to the pinned PyTorch source |
+| `scripts/build_wheel.sh` | PyTorch and `pyodide-build` entry point |
+| `scripts/postprocess_wheel.py` | Deterministic pruning and repacking |
+| `scripts/validate_wheel.py` | Wheel and WebAssembly validation |
+| `scripts/verify_release_artifact.py` | Release checksum, manifest, and input verification |
+| `tests/` | Repository and Pyodide runtime tests |
+| `site/` | Browser playground source |
+| `.github/workflows/` | Validation, build, release, and Pages pipelines |
+
+## Local checks
+
+The fast checks do not require a PyTorch checkout:
 
 ```bash
 python3 scripts/config.py check
 python3 scripts/validate_patches.py
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash -n scripts/*.sh
+
+npm ci --prefix site
+npm run build --prefix site
 ```
 
-The validation workflow additionally checks out the exact pinned PyTorch
-commit without submodules and applies the complete patch series. This is a
-fast drift check only; it does not substitute for the full WebAssembly build
-and runtime smoke test.
-
-Cross-compiling PyTorch is resource-intensive. For a local full build, mirror
-the commands in [`.github/workflows/build.yml`](.github/workflows/build.yml) on
-Linux with at least 16 GiB RAM and ample free disk.
+The full WebAssembly build is resource-intensive. Use the commands and pinned
+environment in [`.github/workflows/build.yml`](.github/workflows/build.yml) on
+Linux with at least 16 GiB RAM and sufficient disk space.
 
 ## Updating versions
 
-Do not change a wheel filename to claim compatibility with another Pyodide
-release. Instead:
+Do not rename a wheel to claim compatibility with a different Pyodide version.
+For a version update:
 
-1. Add or update the complete pins in `config/build.toml`.
-2. Rebase the patch series on the new PyTorch commit and regenerate focused
-   patches with `git format-patch`.
-3. Let `git apply --check` catch upstream drift.
-4. Build a fresh wheel and pass both binary validation and the runtime suite.
-5. Add tests for any newly supported surface before publishing.
+1. Update all related pins in `config/build.toml`.
+2. Rebase and regenerate the patch series against the new PyTorch commit.
+3. Run the patch-applicability checks.
+4. Produce a new wheel with the full build workflow.
+5. Pass binary validation and the Pyodide runtime suite.
+6. Publish a new release tag and manifest.
 
-Pyodide's platform ABI is versioned independently of its raw Emscripten
-version. Keep the runtime, cross-build environment, Python tag, platform tag,
-and Emscripten pin together, then require a fresh runtime smoke test. See
-[compatibility and scope](docs/compatibility.md) for intentional omissions.
+Pyodide's platform ABI is versioned independently of the Emscripten version.
+The runtime, cross-build environment, Python tag, platform tag, and Emscripten
+pin must be updated and tested together. See
+[`docs/compatibility.md`](docs/compatibility.md) for the current implementation
+scope.
 
-## Project status
+## Future work
 
-This is an experimental downstream build, not an official PyTorch or Pyodide
-distribution. The PyTorch name and trademarks belong to their respective
-owners. Build scripts in this repository are MIT-licensed; PyTorch remains
-under its upstream BSD-3-Clause license.
+- Build and publish a tested compatibility matrix across multiple Pyodide and
+  PyTorch versions.
+- Run a selected subset of the upstream PyTorch test suite in Pyodide in
+  addition to the repository smoke tests.
+- Investigate WebGPU support. This is exploratory: the effort depends on the
+  amount of PyTorch backend and browser integration code that must be
+  implemented or adapted.
 
-The upstream tracking discussion is
+## Status and licensing
+
+This is an experimental downstream build and is not an official PyTorch or
+Pyodide distribution. Build and support status is tracked in this repository.
+The related upstream packaging discussion is
 [`pyodide/pyodide-recipes#193`](https://github.com/pyodide/pyodide-recipes/issues/193).
+
+Repository build scripts are MIT-licensed. PyTorch remains under its upstream
+BSD-3-Clause license. PyTorch names and trademarks belong to their respective
+owners.
