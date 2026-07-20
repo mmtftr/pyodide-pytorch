@@ -1,4 +1,5 @@
 # Keep PEP 517's isolated environment on the same tested host toolchain.
 cmake==3.27.9
 ninja==1.13.0
+numpy==2.4.3
 wheel==0.47.0

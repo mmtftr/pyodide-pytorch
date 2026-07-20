@@ -129,9 +129,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .ccache
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-
             ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-
 
@@ -174,8 +174,24 @@ jobs:
           version: ${{ steps.config.outputs.emscripten_version }}
           actions-cache-folder: emsdk-cache
 
+      - name: Normalize pinned Emscripten path for ccache
+        run: |
+          stable_emsdk="$GITHUB_WORKSPACE/emsdk-cache/emsdk-main"
+          test -x "$stable_emsdk/emsdk"
+          "$stable_emsdk/emsdk" activate "$EMSCRIPTEN_VERSION"
+          source "$stable_emsdk/emsdk_env.sh" >/dev/null
+          {
+            echo "EMSDK=$EMSDK"
+            echo "EMSDK_NODE=$EMSDK_NODE"
+          } >> "$GITHUB_ENV"
+          echo "$EMSDK" >> "$GITHUB_PATH"
+          echo "$EMSDK/upstream/emscripten" >> "$GITHUB_PATH"
+          test "$(command -v emcc)" = "$EMSDK/upstream/emscripten/emcc"
+
       - name: Verify Emscripten CMake link features
         run: |
+          stable_emscripten_root="$GITHUB_WORKSPACE/emsdk-cache/emsdk-main/upstream/emscripten"
+          test "$(em-config EMSCRIPTEN_ROOT)" = "$stable_emscripten_root"
           toolchain="$(em-config EMSCRIPTEN_ROOT)/cmake/Modules/Platform/Emscripten.cmake"
           grep -Fq \
             'set(CMAKE_LINK_LIBRARY_USING_WHOLE_ARCHIVE_SUPPORTED True)' \
@@ -188,7 +204,7 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_NOHASHDIR: "true"
-          CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime
+          CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,system_headers
           DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
           PYODIDE_XBUILDENV_PATH: ${{ github.workspace }}/.pyodide-xbuildenv
           PYTORCH_HOST_PROTOC: ${{ runner.temp }}/pytorch-host-protobuf/bin/protoc
@@ -198,7 +214,7 @@ jobs:
           SOURCE_DATE_EPOCH="$(git -C pytorch show -s --format=%ct HEAD)"
           echo "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" >> "$GITHUB_ENV"
           scripts/build_wheel.sh pytorch wheelhouse/raw
-          ccache --show-stats
+          ccache --show-stats --verbose
 
       - name: Prepare compiler cache for rolling save
         if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
@@ -208,7 +224,7 @@ jobs:
           CCACHE_MAXSIZE: 2G
         run: |
           ccache --cleanup
-          ccache --show-stats
+          ccache --show-stats --verbose
 
       - name: Save compiler cache
         if: ${{ always() && !cancelled() && steps.ccache-restore.outcome == 'success' }}
@@ -216,7 +232,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .ccache
-          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune and validate wheel
         id: wheel

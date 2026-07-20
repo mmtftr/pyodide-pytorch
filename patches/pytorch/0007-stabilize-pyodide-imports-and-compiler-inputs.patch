@@ -1,0 +1,66 @@
+From 2f27f3f98e44a401879065a30c9f291c9df5e29f Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Mon, 20 Jul 2026 13:52:01 +0200
+Subject: [PATCH 7/7] Stabilize Pyodide imports and compiler inputs
+
+---
+ tools/setup_helpers/cmake.py      | 14 +++++++++++++-
+ torch/multiprocessing/__init__.py | 13 ++++---------
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/tools/setup_helpers/cmake.py b/tools/setup_helpers/cmake.py
+index e655307..065b942 100644
+--- a/tools/setup_helpers/cmake.py
++++ b/tools/setup_helpers/cmake.py
+@@ -305,7 +305,19 @@ class CMake:
+             try:
+                 import numpy
+ 
+-                build_options["Python_NumPy_INCLUDE_DIR"] = numpy.get_include()
++                numpy_include = numpy.get_include()
++                if pyodide_python_include:
++                    # PEP 517 gives the build environment a random /tmp path.
++                    # Keep that path out of compiler commands so ccache keys
++                    # remain reusable across CI runs.
++                    stable_numpy_include = (
++                        Path(self.build_dir) / "pyodide-numpy-include"
++                    )
++                    shutil.copytree(
++                        numpy_include, stable_numpy_include, dirs_exist_ok=True
++                    )
++                    numpy_include = str(stable_numpy_include.resolve())
++                build_options["Python_NumPy_INCLUDE_DIR"] = numpy_include
+             except ImportError:
+                 pass
+ 
+diff --git a/torch/multiprocessing/__init__.py b/torch/multiprocessing/__init__.py
+index 25da015..e0bb285 100644
+--- a/torch/multiprocessing/__init__.py
++++ b/torch/multiprocessing/__init__.py
+@@ -107,15 +107,9 @@ init_reductions()
+ # Leak ResourceTracker at exit for Python-3.12 on MacOS
+ # See https://github.com/pytorch/pytorch/issues/153050 and
+ # https://github.com/python/cpython/issues/88887 for more details
+-from multiprocessing.resource_tracker import ResourceTracker as _RT
+-
+-
+-if (
+-    sys.platform == "darwin"
+-    and sys.version_info >= (3, 12, 2)
+-    and hasattr(_RT, "__del__")
+-):
++if sys.platform == "darwin" and sys.version_info >= (3, 12, 2):
+     import atexit
++    from multiprocessing.resource_tracker import ResourceTracker as _RT
+ 
+     def _leak_RT_at_exit():
+         def _noop(x):
+@@ -123,4 +117,5 @@ if (
+ 
+         _RT.__del__ = _noop  # type: ignore[attr-defined]
+ 
+-    atexit.register(_leak_RT_at_exit)
++    if hasattr(_RT, "__del__"):
++        atexit.register(_leak_RT_at_exit)
+-- 
+2.51.1
