@@ -37,6 +37,18 @@ jobs:
         with:
           ref: main
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Build playground
+        run: |
+          npm ci --prefix site
+          npm run build --prefix site
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
@@ -46,7 +58,8 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           mkdir -p public/runtime
-          cp -a site/. public/
+          cp site/index.html site/styles.css site/worker.js public/
+          cp site/dist/app.js site/dist/app.js.map public/
           release_args=()
           if [[ -n "$RELEASE_TAG" ]]; then
             release_args+=("$RELEASE_TAG")
