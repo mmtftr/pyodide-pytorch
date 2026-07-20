@@ -97,6 +97,14 @@ Pyodide's standardized `pyemscripten_2026_0_wasm32` platform tag. This
 repository publishes it through GitHub Releases; a CORS-enabled static origin
 also works.
 
+## Browser playground
+
+Open the [PyTorch for Pyodide playground](https://mmtftr.github.io/pyodide-pytorch/)
+to run editable Python examples entirely in the browser. The page resolves the
+latest published GitHub Release, validates its build manifest, selects the
+matching Pyodide runtime, and runs PyTorch in a module Web Worker so the page
+stays responsive.
+
 ## Build
 
 The GitHub Actions workflow is the canonical build environment. Run **Build
