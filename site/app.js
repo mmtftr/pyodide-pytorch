@@ -1,14 +1,16 @@
 const REPOSITORY = "mmtftr/pyodide-pytorch";
-const LATEST_RELEASE_API = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
+const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
+const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
 const FALLBACK_RELEASE = Object.freeze({
   releaseTag: "torch-2.13.0-pyodide-314.0.2-r1",
   releaseUrl:
     "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r1",
-  manifestUrl:
-    "https://github.com/mmtftr/pyodide-pytorch/releases/download/torch-2.13.0-pyodide-314.0.2-r1/build-manifest.json",
-  wheelUrl:
-    "https://github.com/mmtftr/pyodide-pytorch/releases/download/torch-2.13.0-pyodide-314.0.2-r1/torch-2.13.0%2Bpyodide314.0.2-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+  manifestUrl: PUBLISHED_MANIFEST_URL.href,
+  wheelUrl: new URL(
+    "torch-2.13.0+pyodide314.0.2-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+    RUNTIME_BASE_URL,
+  ).href,
   wheelName:
     "torch-2.13.0+pyodide314.0.2-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
   wheelSize: 25_038_799,
@@ -76,14 +78,14 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function validateReleaseManifest(release, manifest) {
+function validateReleaseManifest(manifest) {
   const configuration = manifest?.configuration;
   const wheel = manifest?.wheel;
   if (!configuration || !wheel) {
     throw new Error("The release manifest is missing configuration or wheel metadata.");
   }
-  if (configuration.release?.tag !== release.tag_name) {
-    throw new Error("The latest release tag does not match its build manifest.");
+  if (!configuration.release?.tag) {
+    throw new Error("The release manifest does not identify its GitHub Release.");
   }
   if (!configuration.pyodide?.version || !configuration.pytorch?.version) {
     throw new Error("The release manifest is missing runtime version pins.");
@@ -91,41 +93,27 @@ function validateReleaseManifest(release, manifest) {
   if (!wheel.filename?.endsWith(".whl") || !wheel.sha256 || !wheel.size) {
     throw new Error("The release manifest contains invalid wheel metadata.");
   }
+  if (wheel.filename.includes("/") || wheel.filename.includes("\\")) {
+    throw new Error("The release manifest contains an unsafe wheel filename.");
+  }
 }
 
 async function resolveLatestRelease() {
-  const response = await fetch(LATEST_RELEASE_API, {
-    headers: { Accept: "application/vnd.github+json" },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub returned ${response.status} while resolving the latest release.`);
-  }
-
-  const release = await response.json();
-  const manifestAsset = release.assets?.find((asset) => asset.name === "build-manifest.json");
-  if (!manifestAsset) {
-    throw new Error("The latest release does not contain build-manifest.json.");
-  }
-
-  const manifestResponse = await fetch(manifestAsset.browser_download_url);
+  const manifestResponse = await fetch(PUBLISHED_MANIFEST_URL, { cache: "no-cache" });
   if (!manifestResponse.ok) {
-    throw new Error(`GitHub returned ${manifestResponse.status} for the release manifest.`);
+    throw new Error(`The playground returned ${manifestResponse.status} for its release manifest.`);
   }
   const manifest = await manifestResponse.json();
-  validateReleaseManifest(release, manifest);
-
-  const wheelAsset = release.assets.find((asset) => asset.name === manifest.wheel.filename);
-  if (!wheelAsset) {
-    throw new Error("The wheel named by the release manifest is not attached to the release.");
-  }
+  validateReleaseManifest(manifest);
+  const releaseTag = manifest.configuration.release.tag;
 
   return {
-    releaseTag: release.tag_name,
-    releaseUrl: release.html_url,
-    manifestUrl: manifestAsset.browser_download_url,
-    wheelUrl: wheelAsset.browser_download_url,
-    wheelName: wheelAsset.name,
-    wheelSize: wheelAsset.size,
+    releaseTag,
+    releaseUrl: `https://github.com/${REPOSITORY}/releases/tag/${encodeURIComponent(releaseTag)}`,
+    manifestUrl: PUBLISHED_MANIFEST_URL.href,
+    wheelUrl: new URL(manifest.wheel.filename, RUNTIME_BASE_URL).href,
+    wheelName: manifest.wheel.filename,
+    wheelSize: manifest.wheel.size,
     wheelSha256: manifest.wheel.sha256,
     pyodideVersion: manifest.configuration.pyodide.version,
     torchVersion: manifest.configuration.pytorch.version,
@@ -212,10 +200,10 @@ function startWorker(release) {
 
 async function bootstrap() {
   clearOutput();
-  appendOutput("Resolving the latest verified GitHub Release…\n", "meta");
+  appendOutput("Loading the latest verified GitHub Release…\n", "meta");
   setStatus(
-    "Resolving latest release",
-    "Reading wheel and ABI metadata from GitHub.",
+    "Loading latest release",
+    "Reading wheel and ABI metadata from this deployment.",
     "release",
   );
 
@@ -225,7 +213,7 @@ async function bootstrap() {
   } catch (error) {
     selectedRelease = { ...FALLBACK_RELEASE };
     appendOutput(
-      `Latest-release lookup failed; using verified fallback ${selectedRelease.releaseTag}.\n`,
+      `Published manifest lookup failed; using verified fallback ${selectedRelease.releaseTag}.\n`,
       "error",
     );
     appendOutput(`${error.message}\n`, "meta");
