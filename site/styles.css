@@ -310,7 +310,10 @@ select {
 }
 
 .file-tabbar {
+  display: flex;
   min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
   border-bottom: 1px solid var(--border);
   background: #13161b;
 }
@@ -337,6 +340,18 @@ select {
   color: var(--yellow);
   font-size: 9px;
   font-weight: 700;
+}
+
+.editor-help {
+  padding: 0 10px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.editor-help kbd {
+  color: var(--muted);
 }
 
 .editor {
@@ -369,6 +384,59 @@ select {
 .cm-editor .cm-activeLine,
 .cm-editor .cm-activeLineGutter {
   background: rgba(115, 168, 255, 0.07);
+}
+
+.cm-tooltip.cm-tooltip-hover {
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: #1a1d24;
+  box-shadow: 0 10px 35px rgba(0, 0, 0, 0.42);
+}
+
+.cm-doc-tooltip {
+  display: grid;
+  width: min(520px, calc(100vw - 32px));
+  max-height: 340px;
+  gap: 8px;
+  padding: 11px 12px;
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cm-doc-tooltip strong {
+  color: var(--blue);
+  font-family: var(--mono);
+}
+
+.cm-doc-tooltip code {
+  padding: 6px 8px;
+  overflow: auto hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: #d7e5ff;
+  background: #11141a;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+}
+
+.cm-doc-tooltip p {
+  max-height: 190px;
+  overflow: auto;
+  color: #c3c8d2;
+  white-space: pre-wrap;
+}
+
+.cm-doc-tooltip a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.cm-doc-tooltip a:hover {
+  text-decoration: underline;
 }
 
 .execution-state {
@@ -508,7 +576,7 @@ select {
 
   .runtime-actions {
     display: grid;
-    grid-template-columns: 1fr 0.7fr 1fr;
+    grid-template-columns: 1fr 1fr;
   }
 
   .pane-toolbar {
@@ -523,5 +591,9 @@ select {
 
   select {
     max-width: 190px;
+  }
+
+  .editor-help {
+    display: none;
   }
 }
