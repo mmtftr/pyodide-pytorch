@@ -10,8 +10,20 @@ while IFS='=' read -r name value; do
 done < <(python3 "$repo_root/scripts/config.py" env)
 
 : "${PYTORCH_HOST_PROTOC:?PYTORCH_HOST_PROTOC must point to the native protoc}"
+: "${PYODIDE_LAPACK_LIBRARY:?PYODIDE_LAPACK_LIBRARY must point to libopenblas.so}"
 [[ -x "$PYTORCH_HOST_PROTOC" ]] || {
   echo "PYTORCH_HOST_PROTOC is not executable: $PYTORCH_HOST_PROTOC" >&2
+  exit 1
+}
+[[ -f "$PYODIDE_LAPACK_LIBRARY" ]] || {
+  echo "Pyodide LAPACK library is missing: $PYODIDE_LAPACK_LIBRARY" >&2
+  exit 1
+}
+PYODIDE_LAPACK_LIBRARY="$(realpath "$PYODIDE_LAPACK_LIBRARY")"
+export PYODIDE_LAPACK_LIBRARY
+lapack_magic="$(od -An -tx1 -N8 "$PYODIDE_LAPACK_LIBRARY" | tr -d ' \n')"
+[[ "$lapack_magic" == "0061736d01000000" ]] || {
+  echo "Pyodide LAPACK library is not WebAssembly: $PYODIDE_LAPACK_LIBRARY" >&2
   exit 1
 }
 
@@ -69,7 +81,6 @@ export USE_GLOO=0
 export USE_GLOG=0
 export USE_ITT=0
 export USE_KINETO=0
-export USE_LAPACK=0
 export USE_LEVELDB=0
 export USE_LMDB=0
 export USE_MKLDNN=0
