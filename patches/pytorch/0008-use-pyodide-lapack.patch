@@ -1,0 +1,41 @@
+From b84e03157af6eae64d133f8fd27bb53e96ec86a1 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Mon, 20 Jul 2026 18:30:00 +0300
+Subject: [PATCH 8/8] Use the Pyodide LAPACK shared library
+
+Use the libopenblas side module from the matching Pyodide distribution for
+LAPACK while retaining Eigen as the CPU BLAS implementation.
+---
+ cmake/Dependencies.cmake | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 2baa187e..f89a1db2 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -1527,5 +1527,21 @@ if(NOT INTERN_BUILD_MOBILE)
+-  find_package(LAPACK)
++  if(EMSCRIPTEN AND DEFINED ENV{PYODIDE_LAPACK_LIBRARY})
++    if(NOT EXISTS "$ENV{PYODIDE_LAPACK_LIBRARY}")
++      message(FATAL_ERROR
++        "PYODIDE_LAPACK_LIBRARY does not exist: $ENV{PYODIDE_LAPACK_LIBRARY}")
++    endif()
++    set(LAPACK_FOUND TRUE)
++    set(LAPACK_LIBRARIES "$ENV{PYODIDE_LAPACK_LIBRARY}")
++    message(STATUS "Using Pyodide LAPACK: ${LAPACK_LIBRARIES}")
++  else()
++    find_package(LAPACK)
++  endif()
+   if(LAPACK_FOUND)
+     set(USE_LAPACK 1)
+-    list(APPEND Caffe2_PRIVATE_DEPENDENCY_LIBS ${LAPACK_LIBRARIES})
++    if(EMSCRIPTEN)
++      # Static torch_cpu targets only propagate libraries on their target link
++      # interface. Keep the LAPACK side module on the final torch._C link.
++      list(APPEND Caffe2_DEPENDENCY_LIBS ${LAPACK_LIBRARIES})
++    else()
++      list(APPEND Caffe2_PRIVATE_DEPENDENCY_LIBS ${LAPACK_LIBRARIES})
++    endif()
+   endif()
+-- 
+2.51.1
