@@ -8,6 +8,7 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
+const ASSET_VERSION = "2";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
@@ -530,7 +531,7 @@ function startWorker(release) {
   running = false;
   setControls();
   setExecutionState("starting", "running");
-  runtimeWorker = new Worker("./worker.js", { type: "module" });
+  runtimeWorker = new Worker(`./worker.js?v=${ASSET_VERSION}`, { type: "module" });
   runtimeWorker.addEventListener("message", handleWorkerMessage);
   runtimeWorker.addEventListener("error", (event) => {
     handleWorkerMessage({ data: { type: "fatal", error: event.message || "Web Worker failed." } });
@@ -545,7 +546,7 @@ async function initializeAssetCache() {
     return;
   }
   try {
-    await navigator.serviceWorker.register("./service-worker.js");
+    await navigator.serviceWorker.register(`./service-worker.js?v=${ASSET_VERSION}`);
     await navigator.serviceWorker.ready;
     elements.cacheValue.textContent = "enabled";
     elements.clearCache.disabled = false;
