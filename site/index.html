@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Run the latest PyTorch for Pyodide release directly in your browser."
+    />
+    <meta name="theme-color" content="#101820" />
+    <title>PyTorch for Pyodide · Playground</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="page-glow page-glow-one" aria-hidden="true"></div>
+    <div class="page-glow page-glow-two" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="PyTorch for Pyodide playground home">
+        <span class="brand-mark" aria-hidden="true">τ</span>
+        <span>torch<span class="brand-slash">/</span>wasm</span>
+      </a>
+      <nav aria-label="Project links">
+        <a id="release-link" href="https://github.com/mmtftr/pyodide-pytorch/releases" rel="noreferrer">
+          latest release
+        </a>
+        <a href="https://github.com/mmtftr/pyodide-pytorch" rel="noreferrer">source</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> CPU-only · single-threaded · in-browser</p>
+          <h1 id="hero-title">PyTorch,<br /><em>without a server.</em></h1>
+          <p class="hero-summary">
+            A real PyTorch WebAssembly build running inside Pyodide. Edit the Python,
+            press run, and keep the computation on your machine.
+          </p>
+        </div>
+
+        <aside class="runtime-card" aria-label="Runtime status">
+          <div class="runtime-heading">
+            <div>
+              <p class="label">runtime status</p>
+              <p id="status-text" class="status-text" aria-live="polite">Resolving latest release</p>
+            </div>
+            <span id="status-dot" class="status-dot is-loading" aria-hidden="true"></span>
+          </div>
+          <div
+            id="progress-track"
+            class="progress-track"
+            role="progressbar"
+            aria-label="Runtime loading progress"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="4"
+          >
+            <span id="progress-bar" style="width: 4%"></span>
+          </div>
+          <p id="status-detail" class="status-detail">
+            Reading the signed release metadata from GitHub.
+          </p>
+          <dl class="runtime-facts">
+            <div>
+              <dt>release</dt>
+              <dd id="release-value">—</dd>
+            </div>
+            <div>
+              <dt>Pyodide</dt>
+              <dd id="pyodide-value">—</dd>
+            </div>
+            <div>
+              <dt>wheel</dt>
+              <dd id="wheel-value">—</dd>
+            </div>
+          </dl>
+          <p class="download-note">First load downloads a roughly 25 MB wheel plus runtime dependencies.</p>
+        </aside>
+      </section>
+
+      <section class="playground" aria-labelledby="playground-title">
+        <header class="playground-header">
+          <div>
+            <p class="section-index">01 / playground</p>
+            <h2 id="playground-title">Make tensors move.</h2>
+          </div>
+          <div class="toolbar" aria-label="Playground controls">
+            <button id="copy-button" class="button button-quiet" type="button">Copy code</button>
+            <button id="reset-button" class="button button-quiet" type="button" disabled>
+              Restart runtime
+            </button>
+            <button id="run-button" class="button button-run" type="button" disabled>
+              <span aria-hidden="true">▶</span> Run
+            </button>
+          </div>
+        </header>
+
+        <div class="workbench">
+          <div class="editor-panel">
+            <div class="panel-titlebar">
+              <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <label for="python-code">playground.py</label>
+              <span class="shortcut">⌘ / Ctrl + Enter</span>
+            </div>
+            <textarea id="python-code" spellcheck="false" autocomplete="off" autocapitalize="off">import torch
+
+print(f"torch {torch.__version__}")
+print(
+    "threads:",
+    f"intra={torch.get_num_threads()}",
+    f"interop={torch.get_num_interop_threads()}",
+)
+
+x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+loss = x.square().sum()
+loss.backward()
+
+print("loss:", loss.item())
+print("gradient:", x.grad.tolist())
+
+layer = torch.nn.Linear(3, 1)
+with torch.no_grad():
+    prediction = layer(x).item()
+print("linear prediction:", round(prediction, 4))</textarea>
+          </div>
+
+          <div class="output-panel">
+            <div class="panel-titlebar">
+              <span>output</span>
+              <button id="clear-button" class="text-button" type="button">clear</button>
+            </div>
+            <pre id="output" tabindex="0" aria-live="polite"><span class="output-meta">Waiting for the WebAssembly runtime…</span></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="details" aria-labelledby="details-title">
+        <div class="details-heading">
+          <p class="section-index">02 / under the hood</p>
+          <h2 id="details-title">Native math.<br />Browser constraints.</h2>
+        </div>
+        <div class="detail-grid">
+          <article>
+            <span>01</span>
+            <h3>Real WebAssembly</h3>
+            <p>The compiled <code>torch._C</code> extension runs in Pyodide—not a remote Python service.</p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>Responsive by design</h3>
+            <p>Pyodide and user code live in a module Web Worker, keeping this interface responsive.</p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>Release-bound</h3>
+            <p>The page pairs the wheel with the exact Pyodide ABI recorded in its release manifest.</p>
+          </article>
+          <article>
+            <span>04</span>
+            <h3>One thread</h3>
+            <p>No shared memory or pthreads. ATen and autograd execute inline on the worker thread.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Unofficial, experimental PyTorch builds for Pyodide.</p>
+      <p>Everything here executes locally in your browser.</p>
+    </footer>
+  </body>
+</html>
