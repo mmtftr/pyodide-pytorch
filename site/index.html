@@ -23,6 +23,7 @@
       </div>
 
       <div class="runtime-actions" aria-label="Runtime controls">
+        <button id="clear-cache-button" class="button" type="button" disabled>Clear cache</button>
         <button id="restart-button" class="button" type="button" disabled>Restart runtime</button>
         <button id="stop-button" class="button button-danger" type="button" disabled>Stop</button>
         <button id="run-button" class="button button-primary" type="button" disabled>
@@ -68,6 +69,7 @@
         </header>
         <div class="file-tabbar" aria-label="Open files">
           <span class="file-tab is-active"><span class="python-mark">Py</span><span id="filename">autograd.py</span></span>
+          <span class="editor-help"><kbd>Ctrl</kbd>+<kbd>Space</kbd> autocomplete · <kbd>Tab</kbd> accept · hover for docs</span>
         </div>
         <div id="editor" class="editor" aria-label="Python editor"></div>
       </section>
@@ -91,6 +93,7 @@
       <span><span>torch</span> <strong id="torch-value">—</strong></span>
       <span><span>Pyodide</span> <strong id="pyodide-value">—</strong></span>
       <span><span>wheel</span> <strong id="wheel-value">—</strong></span>
+      <span><span>cache</span> <strong id="cache-value">checking</strong></span>
       <a class="source-link" href="https://github.com/mmtftr/pyodide-pytorch" rel="noreferrer">source</a>
     </footer>
   </body>
