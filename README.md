@@ -96,16 +96,36 @@ static origin.
 
 The [browser playground](https://mmtftr.github.io/pyodide-pytorch/) contains a
 CodeMirror Python editor and a separate output console. It supports Python
-syntax highlighting, editor key bindings, completion for commonly used
-`torch` names, example programs, code reset and copy controls, runtime restart,
-and cancellation by terminating the worker.
+syntax highlighting, editor key bindings, runtime-backed completion, example
+programs, code reset and copy controls, runtime restart, and cancellation by
+terminating the worker.
+
+Editor controls:
+
+| Input | Action |
+| --- | --- |
+| `Ctrl+Space` | Open completion suggestions |
+| `Tab` | Accept the active completion, or indent when completion is closed |
+| `Ctrl+Enter` or `Shift+Enter` | Run the current editor contents |
+| Hover a Python or `torch` symbol | Inspect its runtime signature and docstring |
+
+Completion and hover information are resolved in the loaded Pyodide worker.
+The worker uses Python's `inspect` module against builtins, imported modules,
+PyTorch namespaces, and objects created by executed code. Inspection requests
+accept dotted Python identifiers only, return bounded documentation text, and
+are skipped while user code is running. Results are cached in memory until the
+runtime or user namespace changes. Hover tooltips link to the corresponding
+Python or PyTorch reference page when a stable reference URL is available.
 
 The playground implementation is split into:
 
 - `site/app.js`: editor state, controls, release-manifest loading, and worker
   message handling.
 - `site/worker.js`: Pyodide initialization, package loading, runtime validation,
-  Python execution, stdout, and stderr forwarding.
+  Python execution, stdout and stderr forwarding, completion, and symbol
+  inspection.
+- `site/service-worker.js`: Cache Storage policies for the application shell,
+  Pyodide distribution files, Python packages, and versioned PyTorch wheel.
 - `site/index.html` and `site/styles.css`: application layout and styling.
 
 The Pages workflow downloads the current release artifacts, verifies them with
@@ -168,6 +188,14 @@ GitHub Actions uses separate caches for:
 - The native protobuf compiler.
 - `ccache` compiler output.
 - Playground npm packages.
+
+The browser playground also uses a service worker and the Cache Storage API.
+HTML, the release manifest, and application files use a network-first policy so
+deployments update normally. Versioned Pyodide files, Python wheels, and the
+versioned PyTorch wheel use a cache-first policy. This avoids downloading the
+runtime and 25 MB PyTorch wheel again on a compatible subsequent visit. The
+**Clear cache** control removes only caches owned by this playground. Browser
+storage quotas and eviction policies still apply.
 
 The ABI-specific cache keys include the relevant PyTorch, Pyodide, Python,
 Emscripten, build-tool, configuration, patch, and build-script inputs. Compiler
