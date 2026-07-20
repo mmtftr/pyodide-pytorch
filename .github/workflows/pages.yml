@@ -58,7 +58,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           mkdir -p public/runtime
-          cp site/index.html site/styles.css site/worker.js public/
+          cp site/index.html site/styles.css site/worker.js site/service-worker.js public/
           cp site/dist/app.js site/dist/app.js.map public/
           release_args=()
           if [[ -n "$RELEASE_TAG" ]]; then
