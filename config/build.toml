@@ -11,8 +11,15 @@ python_tag = "cp314"
 emscripten_version = "5.0.3"
 platform_tag = "pyemscripten_2026_0_wasm32"
 
+[lapack]
+package = "libopenblas"
+version = "0.3.28"
+archive = "libopenblas-0.3.28.zip"
+library = "libopenblas.so"
+sha256 = "5489d82d8b00ddd3ba283055ba14e2a03d870f1b7e9c07873d6064a8c306ea4c"
+
 [release]
-tag = "torch-2.13.0-pyodide-314.0.2-r1"
+tag = "torch-2.13.0-pyodide-314.0.2-r2"
 
 [build]
 max_jobs = 3
@@ -23,3 +30,4 @@ wheel_version = "0.47.0"
 ninja_version = "1.13.0"
 cmake_version = "3.27.9"
 numpy_version = "2.4.3"
+auditwheel_emscripten_version = "0.2.5"
