@@ -123,6 +123,25 @@ torch.testing.assert_close(
     torch.tensor([[7.0, 11.0], [9.0, 13.0]]),
 )
 
+matrix = torch.tensor([[4.0, 1.0], [1.0, 3.0]])
+inverse = torch.linalg.inv(matrix)
+torch.testing.assert_close(
+    inverse,
+    torch.tensor([[3.0, -1.0], [-1.0, 4.0]]) / 11.0,
+)
+torch.testing.assert_close(
+    torch.linalg.solve(matrix, torch.tensor([1.0, 2.0])),
+    torch.tensor([1.0, 7.0]) / 11.0,
+)
+torch.testing.assert_close(
+    torch.linalg.eigvalsh(matrix),
+    torch.tensor([2.381966011250105, 4.618033988749895]),
+)
+torch.testing.assert_close(
+    torch.linalg.cholesky(matrix),
+    torch.tensor([[2.0, 0.0], [0.5, 1.6583123951777]]),
+)
+
 model = torch.nn.Linear(2, 1)
 with torch.no_grad():
     model.weight.copy_(torch.tensor([[0.25, -0.5]]))
@@ -155,6 +174,7 @@ json.dumps({
     "intraop_threads": torch.get_num_threads(),
     "interop_threads": torch.get_num_interop_threads(),
     "autograd": True,
+    "linalg": True,
     "optimizer": True,
     "serialization": True,
     "torch_func": True,

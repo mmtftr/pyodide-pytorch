@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import config  # noqa: E402
+import fetch_lapack  # noqa: E402
 import postprocess_wheel  # noqa: E402
 import verify_release_artifact  # noqa: E402
 import validate_wheel  # noqa: E402
@@ -46,13 +47,29 @@ def wasm_with_imported_memory(*, shared: bool) -> bytes:
     return b"\0asm\x01\0\0\0" + b"\x02" + uleb(len(payload)) + payload
 
 
-def wasm_with_dynamic_libraries(*libraries: str) -> bytes:
+def wasm_with_dynamic_libraries(
+    *libraries: str, runtime_paths: tuple[str, ...] = ()
+) -> bytes:
     def string(value: str) -> bytes:
         encoded = value.encode()
         return uleb(len(encoded)) + encoded
 
     needed = uleb(len(libraries)) + b"".join(string(name) for name in libraries)
-    dylink = uleb(2) + uleb(len(needed)) + needed
+    memory = uleb(0) + uleb(0) + uleb(0) + uleb(0)
+    runtime = uleb(len(runtime_paths)) + b"".join(
+        string(name) for name in runtime_paths
+    )
+    dylink = (
+        uleb(1)
+        + uleb(len(memory))
+        + memory
+        + uleb(2)
+        + uleb(len(needed))
+        + needed
+        + uleb(5)
+        + uleb(len(runtime))
+        + runtime
+    )
     payload = string("dylink.0") + dylink
     return b"\0asm\x01\0\0\0" + b"\x00" + uleb(len(payload)) + payload
 
@@ -143,6 +160,26 @@ class ToolTests(unittest.TestCase):
             [],
         )
 
+    def test_runtime_path_detection(self) -> None:
+        self.assertEqual(
+            validate_wheel.wasm_runtime_paths(
+                wasm_with_dynamic_libraries(
+                    "libopenblas.so",
+                    runtime_paths=("$ORIGIN/../torch.libs",),
+                )
+            ),
+            ["$ORIGIN/../torch.libs"],
+        )
+
+    def test_lapack_archive_rejects_unsafe_members(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            archive_path = Path(temporary) / "lapack.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../libopenblas.so", b"\0asm\x01\0\0\0")
+            with zipfile.ZipFile(archive_path) as archive:
+                with self.assertRaisesRegex(ValueError, "unsafe LAPACK archive"):
+                    fetch_lapack.safe_library_member(archive, "libopenblas.so")
+
     def test_unresolved_project_symbol_detection(self) -> None:
         data = wasm_with_function_imports(
             "invoke_vii",
@@ -228,7 +265,15 @@ Tag: {tag}
                 wheel.writestr("torch/__init__.py", "")
                 wheel.writestr("torch/version.py", "__version__ = '0'\n")
                 wheel.writestr(
-                    "torch/_C.test.so", wasm_with_imported_memory(shared=False)
+                    "torch/_C.test.so",
+                    wasm_with_dynamic_libraries(
+                        "libopenblas.so",
+                        runtime_paths=("$ORIGIN/../torch.libs",),
+                    ),
+                )
+                wheel.writestr(
+                    "torch.libs/libopenblas.so",
+                    wasm_with_dynamic_libraries(runtime_paths=("$ORIGIN",)),
                 )
                 wheel.writestr("torch/lib/libtorch.a", b"archive")
                 wheel.writestr("functorch/functorch.so", b"archive")

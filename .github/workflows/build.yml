@@ -106,11 +106,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             "pyodide-build==${PYODIDE_BUILD_VERSION}" \
+            "auditwheel-emscripten==${AUDITWHEEL_EMSCRIPTEN_VERSION}" \
             "wheel==${WHEEL_VERSION}" \
             "ninja==${NINJA_VERSION}" \
             "cmake==${CMAKE_VERSION}"
           actual_pyodide_build="$(python -c 'import importlib.metadata; print(importlib.metadata.version("pyodide-build"))')"
           test "$actual_pyodide_build" = "$PYODIDE_BUILD_VERSION"
+          actual_auditwheel="$(python -c 'import importlib.metadata; print(importlib.metadata.version("auditwheel-emscripten"))')"
+          test "$actual_auditwheel" = "$AUDITWHEEL_EMSCRIPTEN_VERSION"
           test "$(cmake --version | head -1)" = "cmake version $CMAKE_VERSION"
           sudo apt-get update
           sudo apt-get install --yes ccache
@@ -197,6 +200,27 @@ jobs:
             'set(CMAKE_LINK_LIBRARY_USING_WHOLE_ARCHIVE_SUPPORTED True)' \
             "$toolchain"
 
+      - name: Restore pinned LAPACK package
+        id: lapack-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: .pyodide-package-cache
+          key: pyodide-package-v1-${{ steps.config.outputs.pyodide_version }}-${{ steps.config.outputs.lapack_archive }}-${{ steps.config.outputs.lapack_sha256 }}
+
+      - name: Fetch pinned LAPACK library
+        run: |
+          python scripts/fetch_lapack.py \
+            --cache-dir .pyodide-package-cache \
+            --output-dir .pyodide-lapack
+          test -f ".pyodide-lapack/lib/$LAPACK_LIBRARY"
+
+      - name: Save pinned LAPACK package
+        if: steps.lapack-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .pyodide-package-cache
+          key: pyodide-package-v1-${{ steps.config.outputs.pyodide_version }}-${{ steps.config.outputs.lapack_archive }}-${{ steps.config.outputs.lapack_sha256 }}
+
       - name: Build raw WebAssembly wheel
         env:
           CCACHE_BASEDIR: ${{ github.workspace }}/pytorch
@@ -207,6 +231,7 @@ jobs:
           CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,system_headers
           DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
           PYODIDE_XBUILDENV_PATH: ${{ github.workspace }}/.pyodide-xbuildenv
+          PYODIDE_LAPACK_LIBRARY: ${{ github.workspace }}/.pyodide-lapack/lib/${{ steps.config.outputs.lapack_library }}
           PYTORCH_HOST_PROTOC: ${{ runner.temp }}/pytorch-host-protobuf/bin/protoc
         run: |
           ccache --show-config
@@ -234,13 +259,27 @@ jobs:
           path: .ccache
           key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Prune and validate wheel
+      - name: Prune, vendor LAPACK, and validate wheel
         id: wheel
         run: |
           mapfile -t raw_wheels < <(find wheelhouse/raw -maxdepth 1 -type f -name '*.whl' -print)
           test "${#raw_wheels[@]}" -eq 1
           python scripts/postprocess_wheel.py \
             "${raw_wheels[0]}" \
+            --output-dir wheelhouse/pruned \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          mapfile -t pruned_wheels < <(find wheelhouse/pruned -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#pruned_wheels[@]}" -eq 1
+          pyodide auditwheel show "${pruned_wheels[0]}"
+          mkdir -p wheelhouse/repaired
+          pyodide auditwheel repair \
+            "${pruned_wheels[0]}" \
+            --libdir .pyodide-lapack/lib \
+            --output-dir wheelhouse/repaired
+          mapfile -t repaired_wheels < <(find wheelhouse/repaired -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#repaired_wheels[@]}" -eq 1
+          python scripts/postprocess_wheel.py \
+            "${repaired_wheels[0]}" \
             --output-dir wheelhouse/dist \
             --source-date-epoch "$SOURCE_DATE_EPOCH"
           mapfile -t wheels < <(find wheelhouse/dist -maxdepth 1 -type f -name '*.whl' -print)
@@ -278,6 +317,8 @@ jobs:
           name: unverified-torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
           path: |
             wheelhouse/raw/*
+            wheelhouse/pruned/*
+            wheelhouse/repaired/*
             wheelhouse/dist/*
           if-no-files-found: error
           retention-days: 14

@@ -26,6 +26,11 @@ ENV_KEYS = {
     "PYTHON_TAG": ("pyodide", "python_tag"),
     "EMSCRIPTEN_VERSION": ("pyodide", "emscripten_version"),
     "PYODIDE_PLATFORM_TAG": ("pyodide", "platform_tag"),
+    "LAPACK_PACKAGE": ("lapack", "package"),
+    "LAPACK_VERSION": ("lapack", "version"),
+    "LAPACK_ARCHIVE": ("lapack", "archive"),
+    "LAPACK_LIBRARY": ("lapack", "library"),
+    "LAPACK_SHA256": ("lapack", "sha256"),
     "RELEASE_TAG": ("release", "tag"),
     "MAX_JOBS": ("build", "max_jobs"),
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
@@ -33,6 +38,10 @@ ENV_KEYS = {
     "NINJA_VERSION": ("host_tools", "ninja_version"),
     "CMAKE_VERSION": ("host_tools", "cmake_version"),
     "NUMPY_VERSION": ("host_tools", "numpy_version"),
+    "AUDITWHEEL_EMSCRIPTEN_VERSION": (
+        "host_tools",
+        "auditwheel_emscripten_version",
+    ),
 }
 
 
@@ -60,6 +69,11 @@ def validate(config: dict[str, Any]) -> list[str]:
         python_tag = str(lookup(config, ("pyodide", "python_tag")))
         emscripten = str(lookup(config, ("pyodide", "emscripten_version")))
         platform_tag = str(lookup(config, ("pyodide", "platform_tag")))
+        lapack_package = str(lookup(config, ("lapack", "package")))
+        lapack_version = str(lookup(config, ("lapack", "version")))
+        lapack_archive = str(lookup(config, ("lapack", "archive")))
+        lapack_library = str(lookup(config, ("lapack", "library")))
+        lapack_sha256 = str(lookup(config, ("lapack", "sha256")))
         release_tag = str(lookup(config, ("release", "tag")))
         max_jobs = int(lookup(config, ("build", "max_jobs")))
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
@@ -67,6 +81,9 @@ def validate(config: dict[str, Any]) -> list[str]:
         ninja_version = str(lookup(config, ("host_tools", "ninja_version")))
         cmake_version = str(lookup(config, ("host_tools", "cmake_version")))
         numpy_version = str(lookup(config, ("host_tools", "numpy_version")))
+        auditwheel_emscripten_version = str(
+            lookup(config, ("host_tools", "auditwheel_emscripten_version"))
+        )
     except (KeyError, TypeError, ValueError) as exc:
         return [f"missing or invalid manifest value: {exc}"]
 
@@ -93,6 +110,17 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("pyodide.emscripten_version must be a three-part version")
     if not re.fullmatch(r"pyemscripten_\d+_\d+_wasm32", platform_tag):
         errors.append("pyodide.platform_tag must be a pyemscripten wasm32 tag")
+    if lapack_package != "libopenblas":
+        errors.append("lapack.package must be libopenblas")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", lapack_version):
+        errors.append("lapack.version must be a three-part version")
+    expected_lapack_archive = f"{lapack_package}-{lapack_version}.zip"
+    if lapack_archive != expected_lapack_archive:
+        errors.append(f"lapack.archive must be {expected_lapack_archive}")
+    if lapack_library != "libopenblas.so":
+        errors.append("lapack.library must be libopenblas.so")
+    if not re.fullmatch(r"[0-9a-f]{64}", lapack_sha256):
+        errors.append("lapack.sha256 must be a lowercase SHA-256 digest")
     release_match = re.fullmatch(
         r"torch-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*-pyodide-"
         r"(?P<pyodide>\d+\.\d+\.\d+)(?:-r[1-9]\d*)?",
@@ -111,6 +139,10 @@ def validate(config: dict[str, Any]) -> list[str]:
         ("host_tools.ninja_version", ninja_version),
         ("host_tools.cmake_version", cmake_version),
         ("host_tools.numpy_version", numpy_version),
+        (
+            "host_tools.auditwheel_emscripten_version",
+            auditwheel_emscripten_version,
+        ),
     ):
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", value):
             errors.append(f"{name} must be an exact numeric version")
