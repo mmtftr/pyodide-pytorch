@@ -81,7 +81,7 @@ that Pyodide already packages, install `filelock`, and then load the wheel:
 
   await pyodide.runPythonAsync(`
     import micropip
-    await micropip.install("filelock")
+    await micropip.install("filelock==3.32.0")
   `);
 
   await pyodide.loadPackage("https://your-origin.example/torch-...whl");
@@ -186,6 +186,24 @@ runtime and covers tensor operations, autograd, LAPACK-backed inverse, solve,
 eigenvalue, and Cholesky operations, `torch.nn`, an optimizer step,
 serialization, and `torch.func`.
 
+[`tests/upstream.mjs`](tests/upstream.mjs) then copies test modules verbatim
+from the exact pinned PyTorch checkout and executes the CPU/Wasm selection in
+[`tests/upstream_cpu_wasm.json`](tests/upstream_cpu_wasm.json). The current
+contract is 654 passing upstream tests with no runtime skips or expected
+failures. It covers NumPy interop, dtype and comparison behavior, complex
+tensors, views and shape operations, module tracking and autograd hooks, the
+complete CPU type-promotion module, and 71 LAPACK tests across real and complex
+single- and double-precision routines.
+
+The manifest records all 16 exclusions with reasons: three require the disabled
+functorch/`torch.compile` stack, one is an accelerator-only 17/81 GB stress
+test, two are marked expected failures upstream, and ten compare PyTorch's
+int64 `nonzero` indices with NumPy's 32-bit `intp` on wasm32. Other upstream
+`nonzero` tests remain enabled. The
+[upstream test policy](docs/upstream-tests.md) lists every excluded ID, the
+collection-only linalg accommodation, and probed tests that were deliberately
+kept out of CI.
+
 Fast repository validation checks configuration parsing, patch syntax, helper
 scripts, artifact verification, packaging, and WebAssembly inspection. Patch
 applicability is also tested against the exact pinned PyTorch commit without
@@ -233,6 +251,7 @@ build can be reused; the saved key remains unique per run attempt.
 | `scripts/validate_wheel.py` | Wheel and WebAssembly validation |
 | `scripts/verify_release_artifact.py` | Release checksum, manifest, and input verification |
 | `tests/` | Repository and Pyodide runtime tests |
+| `docs/upstream-tests.md` | Upstream CPU/Wasm selection and exclusion inventory |
 | `site/` | Browser playground source |
 | `.github/workflows/` | Validation, build, release, and Pages pipelines |
 
@@ -249,6 +268,23 @@ bash -n scripts/*.sh
 npm ci --prefix site
 npm run build --prefix site
 ```
+
+Given a built wheel and a checkout at the pinned PyTorch commit, reproduce the
+upstream runtime gate with:
+
+```bash
+npm install --no-save \
+  "pyodide@$(python3 scripts/config.py get PYODIDE_VERSION)"
+node tests/upstream.mjs \
+  path/to/torch.whl \
+  path/to/pytorch \
+  "$(python3 scripts/config.py get PYTORCH_VERSION)" \
+  "$(python3 scripts/config.py get PYTORCH_REF)"
+```
+
+Pass `--list-tests` to collect and print the generated upstream test IDs without
+executing them. The runner rejects a source checkout, manifest, torch version,
+or wheel commit that does not match the pinned configuration.
 
 The full WebAssembly build is resource-intensive. Use the commands and pinned
 environment in [`.github/workflows/build.yml`](.github/workflows/build.yml) on
@@ -276,8 +312,9 @@ scope.
 
 - Build and publish a tested compatibility matrix across multiple Pyodide and
   PyTorch versions.
-- Run a selected subset of the upstream PyTorch test suite in Pyodide in
-  addition to the repository smoke tests.
+- Extend the pinned upstream CPU/Wasm suite into more autograd and `torch.nn`
+  modules, and package a wasm-compatible `optree` implementation for the C++
+  pytree parity tests.
 - Investigate WebGPU support. This is exploratory: the effort depends on the
   amount of PyTorch backend and browser integration code that must be
   implemented or adapted.
