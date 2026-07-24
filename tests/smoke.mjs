@@ -68,10 +68,10 @@ async function main() {
       "fsspec",
     ]),
   );
-  await runStage("install filelock", () =>
+  await runStage("install pinned filelock", () =>
     pyodide.runPythonAsync(`
 import micropip
-await micropip.install("filelock")
+await micropip.install("filelock==3.32.0")
 `),
   );
   await runStage("load torch wheel", () => pyodide.loadPackage(wheel));
