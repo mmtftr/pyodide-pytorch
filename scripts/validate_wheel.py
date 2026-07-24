@@ -359,7 +359,10 @@ def validate(path: Path) -> dict[str, object]:
                     f"{module_name} uses shared memory or the WebAssembly atomics feature"
                 )
         dynamic_libraries = wasm_dynamic_libraries(extension_data)
-        if dynamic_libraries != [values["LAPACK_LIBRARY"]]:
+        # The same side module can reach the final link through multiple static
+        # target edges. Emscripten preserves those duplicate needed entries, so
+        # validate the unique dependency set while still requiring LAPACK.
+        if set(dynamic_libraries) != {values["LAPACK_LIBRARY"]}:
             raise ValueError(
                 "torch._C must depend only on the vendored LAPACK library; "
                 "dynamic libraries: "
