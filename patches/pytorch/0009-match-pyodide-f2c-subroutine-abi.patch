@@ -1,0 +1,393 @@
+From 5bb92fcb00141372dff2d5f7c5fd582d580b5caa Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Fri, 24 Jul 2026 12:13:47 +0100
+Subject: [PATCH 9/9] Match Pyodide f2c subroutine ABI
+
+Declare Fortran BLAS and LAPACK subroutines with an int result when compiling for Emscripten. Pyodide builds OpenBLAS from f2c-generated C, and WebAssembly requires exact result-type agreement at link time.
+---
+ aten/src/ATen/native/BatchLinearAlgebra.cpp | 163 +++++++++++---------
+ 1 file changed, 87 insertions(+), 76 deletions(-)
+
+diff --git a/aten/src/ATen/native/BatchLinearAlgebra.cpp b/aten/src/ATen/native/BatchLinearAlgebra.cpp
+index 29ca6e5..38e2531 100644
+--- a/aten/src/ATen/native/BatchLinearAlgebra.cpp
++++ b/aten/src/ATen/native/BatchLinearAlgebra.cpp
+@@ -120,6 +120,15 @@
+ #include <ATen/ops/zeros.h>
+ #endif
+ 
++// Pyodide's OpenBLAS uses f2c's ABI, where Fortran subroutines return int.
++// WebAssembly function types include the result type, so callers must declare
++// the otherwise ignored result consistently with the library.
++#if defined(__EMSCRIPTEN__)
++#define FORTRAN_SUBROUTINE_RETURN_TYPE int
++#else
++#define FORTRAN_SUBROUTINE_RETURN_TYPE void
++#endif
++
+ // First the required LAPACK implementations are registered here.
+ // A comment above the registered LAPACK routine suggest which batched
+ // linear algebra function uses that routine
+@@ -127,10 +136,10 @@
+ 
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+ // getrf
+-extern "C" void zgetrf_(int *m, int *n, std::complex<double> *a, int *lda, int *ipiv, int *info);
+-extern "C" void cgetrf_(int *m, int *n, std::complex<float> *a, int *lda, int *ipiv, int *info);
+-extern "C" void dgetrf_(int *m, int *n, double *a, int *lda, int *ipiv, int *info);
+-extern "C" void sgetrf_(int *m, int *n, float *a, int *lda, int *ipiv, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgetrf_(int *m, int *n, std::complex<double> *a, int *lda, int *ipiv, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgetrf_(int *m, int *n, std::complex<float> *a, int *lda, int *ipiv, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgetrf_(int *m, int *n, double *a, int *lda, int *ipiv, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgetrf_(int *m, int *n, float *a, int *lda, int *ipiv, int *info);
+ #endif
+ 
+ // potrs
+@@ -168,29 +177,29 @@ static inline void spotrs_(char *uplo, int *n, int *nrhs, float *a, int *lda, fl
+ #else
+ 
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+-extern "C" void zpotrs_(char *uplo, int *n, int *nrhs, std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb, int *info);
+-extern "C" void cpotrs_(char *uplo, int *n, int *nrhs, std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb, int *info);
+-extern "C" void dpotrs_(char *uplo, int *n, int *nrhs, double *a, int *lda, double *b, int *ldb, int *info);
+-extern "C" void spotrs_(char *uplo, int *n, int *nrhs, float *a, int *lda, float *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zpotrs_(char *uplo, int *n, int *nrhs, std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cpotrs_(char *uplo, int *n, int *nrhs, std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dpotrs_(char *uplo, int *n, int *nrhs, double *a, int *lda, double *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE spotrs_(char *uplo, int *n, int *nrhs, float *a, int *lda, float *b, int *ldb, int *info);
+ #endif
+ 
+ #endif
+ 
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+ // potrf
+-extern "C" void zpotrf_(char *uplo, int *n, std::complex<double> *a, int *lda, int *info);
+-extern "C" void cpotrf_(char *uplo, int *n, std::complex<float> *a, int *lda, int *info);
+-extern "C" void dpotrf_(char *uplo, int *n, double *a, int *lda, int *info);
+-extern "C" void spotrf_(char *uplo, int *n, float *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zpotrf_(char *uplo, int *n, std::complex<double> *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cpotrf_(char *uplo, int *n, std::complex<float> *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dpotrf_(char *uplo, int *n, double *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE spotrf_(char *uplo, int *n, float *a, int *lda, int *info);
+ 
+ // potri
+-extern "C" void zpotri_(char *uplo, int *n, std::complex<double> *a, int *lda, int *info);
+-extern "C" void cpotri_(char *uplo, int *n, std::complex<float> *a, int *lda, int *info);
+-extern "C" void dpotri_(char *uplo, int *n, double *a, int *lda, int *info);
+-extern "C" void spotri_(char *uplo, int *n, float *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zpotri_(char *uplo, int *n, std::complex<double> *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cpotri_(char *uplo, int *n, std::complex<float> *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dpotri_(char *uplo, int *n, double *a, int *lda, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE spotri_(char *uplo, int *n, float *a, int *lda, int *info);
+ 
+ // sytrf
+-extern "C" void dsytrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dsytrf_(
+     char* uplo,
+     int* n,
+     double* a,
+@@ -199,7 +208,7 @@ extern "C" void dsytrf_(
+     double* work,
+     int* lwork,
+     int* info);
+-extern "C" void ssytrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE ssytrf_(
+     char* uplo,
+     int* n,
+     float* a,
+@@ -208,7 +217,7 @@ extern "C" void ssytrf_(
+     float* work,
+     int* lwork,
+     int* info);
+-extern "C" void zsytrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zsytrf_(
+     char* uplo,
+     int* n,
+     std::complex<double>* a,
+@@ -217,7 +226,7 @@ extern "C" void zsytrf_(
+     std::complex<double>* work,
+     int* lwork,
+     int* info);
+-extern "C" void csytrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE csytrf_(
+     char* uplo,
+     int* n,
+     std::complex<float>* a,
+@@ -228,7 +237,7 @@ extern "C" void csytrf_(
+     int* info);
+ 
+ // hetrf
+-extern "C" void zhetrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zhetrf_(
+     char* uplo,
+     int* n,
+     std::complex<double>* a,
+@@ -237,7 +246,7 @@ extern "C" void zhetrf_(
+     std::complex<double>* work,
+     int* lwork,
+     int* info);
+-extern "C" void chetrf_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE chetrf_(
+     char* uplo,
+     int* n,
+     std::complex<float>* a,
+@@ -248,7 +257,7 @@ extern "C" void chetrf_(
+     int* info);
+ 
+ // sytrs
+-extern "C" void dsytrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dsytrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -258,7 +267,7 @@ extern "C" void dsytrs_(
+     double* b,
+     int* ldb,
+     int* info);
+-extern "C" void ssytrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE ssytrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -268,7 +277,7 @@ extern "C" void ssytrs_(
+     float* b,
+     int* ldb,
+     int* info);
+-extern "C" void zsytrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zsytrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -278,7 +287,7 @@ extern "C" void zsytrs_(
+     std::complex<double>* b,
+     int* ldb,
+     int* info);
+-extern "C" void csytrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE csytrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -290,7 +299,7 @@ extern "C" void csytrs_(
+     int* info);
+ 
+ // hetrs
+-extern "C" void zhetrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zhetrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -300,7 +309,7 @@ extern "C" void zhetrs_(
+     std::complex<double>* b,
+     int* ldb,
+     int* info);
+-extern "C" void chetrs_(
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE chetrs_(
+     char* uplo,
+     int* n,
+     int* nrhs,
+@@ -312,16 +321,16 @@ extern "C" void chetrs_(
+     int* info);
+ 
+ // geqrf
+-extern "C" void zgeqrf_(int *m, int *n, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *work, int *lwork, int *info);
+-extern "C" void cgeqrf_(int *m, int *n, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *work, int *lwork, int *info);
+-extern "C" void dgeqrf_(int *m, int *n, double *a, int *lda, double *tau, double *work, int *lwork, int *info);
+-extern "C" void sgeqrf_(int *m, int *n, float *a, int *lda, float *tau, float *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgeqrf_(int *m, int *n, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgeqrf_(int *m, int *n, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgeqrf_(int *m, int *n, double *a, int *lda, double *tau, double *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgeqrf_(int *m, int *n, float *a, int *lda, float *tau, float *work, int *lwork, int *info);
+ 
+ // orgqr
+-extern "C" void zungqr_(int *m, int *n, int *k, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *work, int *lwork, int *info);
+-extern "C" void cungqr_(int *m, int *n, int *k, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *work, int *lwork, int *info);
+-extern "C" void dorgqr_(int *m, int *n, int *k, double *a, int *lda, double *tau, double *work, int *lwork, int *info);
+-extern "C" void sorgqr_(int *m, int *n, int *k, float *a, int *lda, float *tau, float *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zungqr_(int *m, int *n, int *k, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cungqr_(int *m, int *n, int *k, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dorgqr_(int *m, int *n, int *k, double *a, int *lda, double *tau, double *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sorgqr_(int *m, int *n, int *k, float *a, int *lda, float *tau, float *work, int *lwork, int *info);
+ #endif
+ 
+ // ormqr
+@@ -354,23 +363,23 @@ static inline void sormqr_(char *side, char *trans, int *m, int *n, int *k, floa
+ }
+ #else
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+-extern "C" void zunmqr_(char *side, char *trans, int *m, int *n, int *k, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *c, int *ldc, std::complex<double> *work, int *lwork, int *info);
+-extern "C" void cunmqr_(char *side, char *trans, int *m, int *n, int *k, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *c, int *ldc, std::complex<float> *work, int *lwork, int *info);
+-extern "C" void dormqr_(char *side, char *trans, int *m, int *n, int *k, double *a, int *lda, double *tau, double *c, int *ldc, double *work, int *lwork, int *info);
+-extern "C" void sormqr_(char *side, char *trans, int *m, int *n, int *k, float *a, int *lda, float *tau, float *c, int *ldc, float *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zunmqr_(char *side, char *trans, int *m, int *n, int *k, std::complex<double> *a, int *lda, std::complex<double> *tau, std::complex<double> *c, int *ldc, std::complex<double> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cunmqr_(char *side, char *trans, int *m, int *n, int *k, std::complex<float> *a, int *lda, std::complex<float> *tau, std::complex<float> *c, int *ldc, std::complex<float> *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dormqr_(char *side, char *trans, int *m, int *n, int *k, double *a, int *lda, double *tau, double *c, int *ldc, double *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sormqr_(char *side, char *trans, int *m, int *n, int *k, float *a, int *lda, float *tau, float *c, int *ldc, float *work, int *lwork, int *info);
+ #endif
+ #endif
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+ // syevd
+-extern "C" void zheevd_(char *jobz, char *uplo, int *n, std::complex<double> *a, int *lda, double *w, std::complex<double> *work, int *lwork, double *rwork, int *lrwork, int *iwork, int *liwork, int *info);
+-extern "C" void cheevd_(char *jobz, char *uplo, int *n, std::complex<float> *a, int *lda, float *w, std::complex<float> *work, int *lwork, float *rwork, int *lrwork, int *iwork, int *liwork, int *info);
+-extern "C" void dsyevd_(char *jobz, char *uplo, int *n, double *a, int *lda, double *w, double *work, int *lwork, int *iwork, int *liwork, int *info);
+-extern "C" void ssyevd_(char *jobz, char *uplo, int *n, float *a, int *lda, float *w, float *work, int *lwork, int *iwork, int *liwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zheevd_(char *jobz, char *uplo, int *n, std::complex<double> *a, int *lda, double *w, std::complex<double> *work, int *lwork, double *rwork, int *lrwork, int *iwork, int *liwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cheevd_(char *jobz, char *uplo, int *n, std::complex<float> *a, int *lda, float *w, std::complex<float> *work, int *lwork, float *rwork, int *lrwork, int *iwork, int *liwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dsyevd_(char *jobz, char *uplo, int *n, double *a, int *lda, double *w, double *work, int *lwork, int *iwork, int *liwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE ssyevd_(char *jobz, char *uplo, int *n, float *a, int *lda, float *w, float *work, int *lwork, int *iwork, int *liwork, int *info);
+ 
+ // geev
+-extern "C" void dgeev_(char *jobvl, char *jobvr, int *n, double *a, int *lda, double *wr, double *wi, double* vl, int *ldvl, double *vr, int *ldvr, double *work, int *lwork, int *info);
+-extern "C" void sgeev_(char *jobvl, char *jobvr, int *n, float *a, int *lda, float *wr, float *wi, float* vl, int *ldvl, float *vr, int *ldvr, float *work, int *lwork, int *info);
+-extern "C" void cgeev_(char *jobvl, char *jobvr, int *n,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgeev_(char *jobvl, char *jobvr, int *n, double *a, int *lda, double *wr, double *wi, double* vl, int *ldvl, double *vr, int *ldvr, double *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgeev_(char *jobvl, char *jobvr, int *n, float *a, int *lda, float *wr, float *wi, float* vl, int *ldvl, float *vr, int *ldvr, float *work, int *lwork, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgeev_(char *jobvl, char *jobvr, int *n,
+              std::complex<float> *a, int *lda,
+              std::complex<float> *w,
+              std::complex<float> *vl, int *ldvl,
+@@ -378,7 +387,7 @@ extern "C" void cgeev_(char *jobvl, char *jobvr, int *n,
+              std::complex<float> *work, int *lwork,
+              float *rwork,
+              int *info);
+-extern "C" void zgeev_(char *jobvl, char *jobvr, int *n,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgeev_(char *jobvl, char *jobvr, int *n,
+              std::complex<double> *a, int *lda,
+              std::complex<double> *w,
+              std::complex<double> *vl, int *ldvl,
+@@ -388,89 +397,89 @@ extern "C" void zgeev_(char *jobvl, char *jobvr, int *n,
+              int *info);
+ 
+ // gesdd
+-extern "C" void zgesdd_(char *jobz, int *m, int *n, std::complex<double> *a, int *lda,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgesdd_(char *jobz, int *m, int *n, std::complex<double> *a, int *lda,
+                         double *s, std::complex<double> *u, int *ldu, std::complex<double> *vt, int *ldvt, std::complex<double> *work, int *lwork, double *rwork, int *iwork, int *info);
+-extern "C" void cgesdd_(char *jobz, int *m, int *n, std::complex<float> *a, int *lda,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgesdd_(char *jobz, int *m, int *n, std::complex<float> *a, int *lda,
+                         float *s, std::complex<float> *u, int *ldu, std::complex<float> *vt, int *ldvt, std::complex<float> *work, int *lwork, float *rwork, int *iwork, int *info);
+-extern "C" void dgesdd_(char *jobz, int *m, int *n, double *a, int *lda,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgesdd_(char *jobz, int *m, int *n, double *a, int *lda,
+                         double *s, double *u, int *ldu, double *vt, int *ldvt, double *work, int *lwork, int *iwork, int *info);
+-extern "C" void sgesdd_(char *jobz, int *m, int *n, float *a, int *lda,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgesdd_(char *jobz, int *m, int *n, float *a, int *lda,
+                         float *s, float *u, int *ldu, float *vt, int *ldvt, float *work, int *lwork, int *iwork, int *info);
+ 
+ // getrs
+-extern "C" void zgetrs_(char *trans, int *n, int *nrhs, std::complex<double> *a, int *lda, int *ipiv, std::complex<double> *b, int *ldb, int *info);
+-extern "C" void cgetrs_(char *trans, int *n, int *nrhs, std::complex<float> *a, int *lda, int *ipiv, std::complex<float> *b, int *ldb, int *info);
+-extern "C" void dgetrs_(char *trans, int *n, int *nrhs, double *a, int *lda, int *ipiv, double *b, int *ldb, int *info);
+-extern "C" void sgetrs_(char *trans, int *n, int *nrhs, float *a, int *lda, int *ipiv, float *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgetrs_(char *trans, int *n, int *nrhs, std::complex<double> *a, int *lda, int *ipiv, std::complex<double> *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgetrs_(char *trans, int *n, int *nrhs, std::complex<float> *a, int *lda, int *ipiv, std::complex<float> *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgetrs_(char *trans, int *n, int *nrhs, double *a, int *lda, int *ipiv, double *b, int *ldb, int *info);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgetrs_(char *trans, int *n, int *nrhs, float *a, int *lda, int *ipiv, float *b, int *ldb, int *info);
+ 
+ // gels
+-extern "C" void zgels_(char *trans, int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgels_(char *trans, int *m, int *n, int *nrhs,
+     std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb,
+     std::complex<double> *work, int *lwork, int *info);
+-extern "C" void cgels_(char *trans, int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgels_(char *trans, int *m, int *n, int *nrhs,
+     std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb,
+     std::complex<float> *work, int *lwork, int *info);
+-extern "C" void dgels_(char *trans, int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgels_(char *trans, int *m, int *n, int *nrhs,
+     double *a, int *lda, double *b, int *ldb,
+     double *work, int *lwork, int *info);
+-extern "C" void sgels_(char *trans, int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgels_(char *trans, int *m, int *n, int *nrhs,
+     float *a, int *lda, float *b, int *ldb,
+     float *work, int *lwork, int *info);
+ 
+ // gelsd
+-extern "C" void zgelsd_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgelsd_(int *m, int *n, int *nrhs,
+     std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb,
+     double *s, double *rcond, int *rank,
+     std::complex<double> *work, int *lwork, double *rwork, int *iwork, int *info);
+-extern "C" void cgelsd_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgelsd_(int *m, int *n, int *nrhs,
+     std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb,
+     float *s, float *rcond, int *rank,
+     std::complex<float> *work, int *lwork, float *rwork, int *iwork, int *info);
+-extern "C" void dgelsd_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgelsd_(int *m, int *n, int *nrhs,
+     double *a, int *lda, double *b, int *ldb,
+     double *s, double *rcond, int *rank,
+     double *work, int *lwork, int *iwork, int *info);
+-extern "C" void sgelsd_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgelsd_(int *m, int *n, int *nrhs,
+     float *a, int *lda, float *b, int *ldb,
+     float *s, float *rcond, int *rank,
+     float *work, int *lwork, int *iwork, int *info);
+ 
+ // gelsy
+-extern "C" void zgelsy_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgelsy_(int *m, int *n, int *nrhs,
+     std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb,
+     int *jpvt, double *rcond, int *rank,
+     std::complex<double> *work, int *lwork,
+     double *rwork, int *info);
+-extern "C" void cgelsy_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgelsy_(int *m, int *n, int *nrhs,
+     std::complex<float> * a, int *lda, std::complex<float> *b, int *ldb,
+     int *jpvt, float *rcond, int *rank,
+     std::complex<float> *work, int *lwork,
+     float *rwork, int *info);
+-extern "C" void dgelsy_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgelsy_(int *m, int *n, int *nrhs,
+     double *a, int *lda, double *b, int *ldb,
+     int *jpvt, double *rcond, int *rank,
+     double *work, int *lwork, int *info);
+-extern "C" void sgelsy_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgelsy_(int *m, int *n, int *nrhs,
+     float *a, int *lda, float *b, int *ldb,
+     int *jpvt, float *rcond, int *rank,
+     float *work, int *lwork, int *info);
+ 
+ // gelss
+-extern "C" void zgelss_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE zgelss_(int *m, int *n, int *nrhs,
+     std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb,
+     double *s, double *rcond, int *rank,
+     std::complex<double> *work, int *lwork,
+     double *rwork, int *info);
+-extern "C" void cgelss_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE cgelss_(int *m, int *n, int *nrhs,
+     std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb,
+     float *s, float *rcond, int *rank,
+     std::complex<float> *work, int *lwork,
+     float *rwork, int *info);
+-extern "C" void dgelss_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dgelss_(int *m, int *n, int *nrhs,
+     double *a, int *lda, double *b, int *ldb,
+     double *s, double *rcond, int *rank,
+     double *work, int *lwork, int *info);
+-extern "C" void sgelss_(int *m, int *n, int *nrhs,
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE sgelss_(int *m, int *n, int *nrhs,
+     float *a, int *lda, float *b, int *ldb,
+     float *s, float *rcond, int *rank,
+     float *work, int *lwork, int *info);
+@@ -480,13 +489,15 @@ extern "C" void sgelss_(int *m, int *n, int *nrhs,
+ #if AT_BUILD_WITH_BLAS()
+ // trsm
+ #ifndef _ARMPL_H  // ArmPL's `cblas.h` pulls in these prototypes.
+-extern "C" void ztrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, std::complex<double> *alpha, std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb);
+-extern "C" void ctrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, std::complex<float> *alpha, std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb);
+-extern "C" void dtrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, double *alpha, double *a, int *lda, double *b, int *ldb);
+-extern "C" void strsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, float *alpha, float *a, int *lda, float *b, int *ldb);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE ztrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, std::complex<double> *alpha, std::complex<double> *a, int *lda, std::complex<double> *b, int *ldb);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE ctrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, std::complex<float> *alpha, std::complex<float> *a, int *lda, std::complex<float> *b, int *ldb);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE dtrsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, double *alpha, double *a, int *lda, double *b, int *ldb);
++extern "C" FORTRAN_SUBROUTINE_RETURN_TYPE strsm_(char *side, char *uplo, char *trans, char *diag, int *n, int *nrhs, float *alpha, float *a, int *lda, float *b, int *ldb);
+ #endif
+ #endif
+ 
++#undef FORTRAN_SUBROUTINE_RETURN_TYPE
++
+ namespace at::meta {
+ 
+ TORCH_META_FUNC(linalg_ldl_factor_ex)
+-- 
+2.51.1
+

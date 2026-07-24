@@ -21,6 +21,10 @@ The build explicitly mirrors PyTorch 2.13's C++20 and C17 language-standard
 requirements. Exception handling follows the Pyodide 314 ABI
 (`-fwasm-exceptions` with Wasm `longjmp` support); the patch series removes
 PyTorch's incompatible legacy `DISABLE_EXCEPTION_CATCHING` setting.
+LAPACK follows Pyodide's `f2c` ABI: Fortran subroutines have an `i32` result
+instead of the native Fortran `void` result. Although callers ignore that
+result, WebAssembly includes it in the function type and rejects mismatched
+declarations at link time.
 
 The wheel is CPU-only and intentionally has no WebAssembly shared memory. Both
 ATen thread counts are fixed at one, and inter-op work runs inline. Requests to

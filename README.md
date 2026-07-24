@@ -37,6 +37,9 @@ The current build has the following constraints:
 - Eigen provides the CPU BLAS implementation. The wheel vendors the matching
   Pyodide `libopenblas.so` side module for LAPACK-backed `torch.linalg`
   operations.
+- Pyodide builds OpenBLAS's Fortran routines through `f2c`, whose subroutine
+  ABI returns an integer. The PyTorch patch set uses the same result type under
+  Emscripten because WebAssembly requires exact function signatures.
 
 The patch set keeps the Python bindings and statically links the required
 libtorch components into the `torch._C` Pyodide side module. `torch._C` has one
