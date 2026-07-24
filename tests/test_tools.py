@@ -267,6 +267,9 @@ Tag: {tag}
                 wheel.writestr(
                     "torch/_C.test.so",
                     wasm_with_dynamic_libraries(
+                        # Static target edges may preserve the same needed
+                        # side module more than once.
+                        "libopenblas.so",
                         "libopenblas.so",
                         runtime_paths=("$ORIGIN/../torch.libs",),
                     ),
@@ -282,6 +285,10 @@ Tag: {tag}
                 wheel.writestr("torch-0.dist-info/RECORD", "")
             destination = postprocess_wheel.repack(source, root / "out", 1_700_000_000)
             result = validate_wheel.validate(destination)
+            self.assertEqual(
+                result["dynamic_libraries"],
+                ["libopenblas.so", "libopenblas.so"],
+            )
             self.assertEqual(result["threading"], "single")
             with zipfile.ZipFile(destination) as wheel:
                 names = wheel.namelist()
