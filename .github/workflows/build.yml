@@ -309,6 +309,11 @@ jobs:
             "${{ steps.wheel.outputs.path }}" \
             "$PYTORCH_VERSION" \
             "$PYTORCH_REF"
+          node tests/upstream.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            pytorch \
+            "$PYTORCH_VERSION" \
+            "$PYTORCH_REF"
 
       - name: Upload unverified wheel after validation or smoke failure
         if: ${{ failure() && steps.wheel.outcome != 'skipped' }}
