@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "pytorch_ref": "cf30153c4c131c8164ee7798e5022d810682e2cb",
+  "pyodide_packages": [
+    "micropip",
+    "numpy",
+    "typing-extensions",
+    "sympy",
+    "networkx",
+    "jinja2",
+    "fsspec"
+  ],
+  "pypi_packages": [
+    "filelock==3.32.0",
+    "expecttest==0.3.0"
+  ],
+  "collection_stubs": [
+    {
+      "module": "functorch.experimental.control_flow",
+      "reason": "test_linalg imports quantization helpers that reference this module, but the selected LAPACK tests do not use those helpers and BUILD_FUNCTORCH is disabled."
+    }
+  ],
+  "expected": {
+    "total": 654,
+    "passed": 654,
+    "skipped": 0,
+    "excluded": 16,
+    "collection_stubs": 1,
+    "expected_failures": 0
+  },
+  "modules": [
+    {
+      "path": "test/test_comparison_utils.py",
+      "tests": [
+        "TestComparisonUtils.test_all_equal_no_assert",
+        "TestComparisonUtils.test_all_equal_no_assert_nones",
+        "TestComparisonUtils.test_assert_dtype",
+        "TestComparisonUtils.test_assert_layout",
+        "TestComparisonUtils.test_assert_sizes",
+        "TestComparisonUtils.test_assert_strides"
+      ]
+    },
+    {
+      "path": "test/test_type_info.py",
+      "tests": [
+        "TestDTypeInfo.test_finfo",
+        "TestDTypeInfo.test_iinfo",
+        "TestDTypeInfo.test_invalid_input",
+        "TestDTypeInfo.test_to_complex",
+        "TestDTypeInfo.test_to_real"
+      ]
+    },
+    {
+      "path": "test/test_numpy_interop.py",
+      "tests": [
+        "*"
+      ],
+      "excluded_tests": [
+        {
+          "id": "TestNumPyInteropCPU.test_copy_mode_cpu",
+          "reason": "Requires torch.compile and functorch; BUILD_FUNCTORCH is disabled for this CPU/Wasm wheel."
+        },
+        {
+          "id": "TestNumPyInteropCPU.test_ndarray_astype_object_graph_break_2_cpu",
+          "reason": "Requires torch.compile and functorch; BUILD_FUNCTORCH is disabled for this CPU/Wasm wheel."
+        },
+        {
+          "id": "TestNumPyInteropCPU.test_ndarray_astype_object_graph_break_cpu",
+          "reason": "Requires torch.compile and functorch; BUILD_FUNCTORCH is disabled for this CPU/Wasm wheel."
+        }
+      ]
+    },
+    {
+      "path": "test/test_as_strided.py",
+      "tests": [
+        "*"
+      ]
+    },
+    {
+      "path": "test/test_module_tracker.py",
+      "tests": [
+        "*"
+      ]
+    },
+    {
+      "path": "test/test_complex.py",
+      "tests": [
+        "*"
+      ]
+    },
+    {
+      "path": "test/test_shape_ops.py",
+      "tests": [
+        "*"
+      ],
+      "excluded_tests": [
+        {
+          "id": "TestShapeOpsCPU.test_flip_large_tensor_cpu",
+          "reason": "Accelerator-only 17/81 GB stress test; upstream explicitly does not run it on CPU."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_flip_unsupported_dtype_cpu_quint2x4",
+          "reason": "Marked expectedFailure upstream for an unsupported packed quantized dtype."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_flip_unsupported_dtype_cpu_quint4x2",
+          "reason": "Marked expectedFailure upstream for an unsupported packed quantized dtype."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_bfloat16",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_bool",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_float16",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_float32",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_float64",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_int16",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_int32",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_int64",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_int8",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        },
+        {
+          "id": "TestShapeOpsCPU.test_nonzero_cpu_uint8",
+          "reason": "NumPy indices use 32-bit intp on wasm32 while torch.nonzero correctly returns torch.int64; other upstream nonzero tests remain enabled."
+        }
+      ]
+    },
+    {
+      "path": "test/test_type_promotion.py",
+      "tests": [
+        "*"
+      ]
+    },
+    {
+      "path": "test/test_linalg.py",
+      "tests": [
+        "TestLinalgCPU.test_cholesky_cpu_complex128",
+        "TestLinalgCPU.test_cholesky_cpu_complex64",
+        "TestLinalgCPU.test_cholesky_cpu_float32",
+        "TestLinalgCPU.test_cholesky_cpu_float64",
+        "TestLinalgCPU.test_eigh_cpu_complex128",
+        "TestLinalgCPU.test_eigh_cpu_complex64",
+        "TestLinalgCPU.test_eigh_cpu_float32",
+        "TestLinalgCPU.test_eigh_cpu_float64",
+        "TestLinalgCPU.test_inverse_cpu_complex128",
+        "TestLinalgCPU.test_inverse_cpu_complex64",
+        "TestLinalgCPU.test_inverse_cpu_float32",
+        "TestLinalgCPU.test_inverse_cpu_float64",
+        "TestLinalgCPU.test_solve_cpu_complex128",
+        "TestLinalgCPU.test_solve_cpu_complex64",
+        "TestLinalgCPU.test_solve_cpu_float32",
+        "TestLinalgCPU.test_solve_cpu_float64",
+        "TestLinalgCPU.test_svd_cpu_complex128",
+        "TestLinalgCPU.test_svd_cpu_complex64",
+        "TestLinalgCPU.test_svd_cpu_float32",
+        "TestLinalgCPU.test_svd_cpu_float64",
+        "TestLinalgCPU.test_cholesky_solve_cpu_complex128",
+        "TestLinalgCPU.test_cholesky_solve_cpu_complex64",
+        "TestLinalgCPU.test_cholesky_solve_cpu_float32",
+        "TestLinalgCPU.test_cholesky_solve_cpu_float64",
+        "TestLinalgCPU.test_eig_numpy_cpu_complex128",
+        "TestLinalgCPU.test_eig_numpy_cpu_float64",
+        "TestLinalgCPU.test_linalg_lstsq_cpu_complex128",
+        "TestLinalgCPU.test_linalg_lstsq_cpu_complex64",
+        "TestLinalgCPU.test_linalg_lstsq_cpu_float64",
+        "TestLinalgCPU.test_linalg_lstsq_batch_broadcasting_cpu_float32",
+        "TestLinalgCPU.test_linalg_lu_family_cpu_complex128",
+        "TestLinalgCPU.test_linalg_lu_family_cpu_complex64",
+        "TestLinalgCPU.test_linalg_lu_family_cpu_float32",
+        "TestLinalgCPU.test_linalg_lu_family_cpu_float64",
+        "TestLinalgCPU.test_linalg_lu_solve_cpu_complex128",
+        "TestLinalgCPU.test_linalg_lu_solve_cpu_complex64",
+        "TestLinalgCPU.test_linalg_lu_solve_cpu_float32",
+        "TestLinalgCPU.test_linalg_lu_solve_cpu_float64",
+        "TestLinalgCPU.test_pinv_cpu_complex128",
+        "TestLinalgCPU.test_pinv_cpu_complex64",
+        "TestLinalgCPU.test_pinv_cpu_float32",
+        "TestLinalgCPU.test_pinv_cpu_float64",
+        "TestLinalgCPU.test_qr_cpu_complex128",
+        "TestLinalgCPU.test_qr_cpu_complex64",
+        "TestLinalgCPU.test_qr_cpu_float32",
+        "TestLinalgCPU.test_qr_cpu_float64",
+        "TestLinalgCPU.test_slogdet_cpu_complex128",
+        "TestLinalgCPU.test_slogdet_cpu_complex64",
+        "TestLinalgCPU.test_slogdet_cpu_float32",
+        "TestLinalgCPU.test_slogdet_cpu_float64",
+        "TestLinalgCPU.test_geqrf_cpu_complex128",
+        "TestLinalgCPU.test_geqrf_cpu_complex64",
+        "TestLinalgCPU.test_geqrf_cpu_float32",
+        "TestLinalgCPU.test_geqrf_cpu_float64",
+        "TestLinalgCPU.test_householder_product_cpu_complex128",
+        "TestLinalgCPU.test_householder_product_cpu_complex64",
+        "TestLinalgCPU.test_householder_product_cpu_float32",
+        "TestLinalgCPU.test_householder_product_cpu_float64",
+        "TestLinalgCPU.test_lapack_empty_cpu",
+        "TestLinalgCPU.test_ldl_factor_cpu_complex128",
+        "TestLinalgCPU.test_ldl_factor_cpu_complex64",
+        "TestLinalgCPU.test_ldl_factor_cpu_float32",
+        "TestLinalgCPU.test_ldl_factor_cpu_float64",
+        "TestLinalgCPU.test_ldl_solve_cpu_complex128",
+        "TestLinalgCPU.test_ldl_solve_cpu_complex64",
+        "TestLinalgCPU.test_ldl_solve_cpu_float32",
+        "TestLinalgCPU.test_ldl_solve_cpu_float64",
+        "TestLinalgCPU.test_ormqr_cpu_complex128",
+        "TestLinalgCPU.test_ormqr_cpu_complex64",
+        "TestLinalgCPU.test_ormqr_cpu_float32",
+        "TestLinalgCPU.test_ormqr_cpu_float64"
+      ]
+    }
+  ]
+}
