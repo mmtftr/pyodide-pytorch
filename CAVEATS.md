@@ -42,8 +42,8 @@ WebGPU API, but it is not a general PyTorch accelerator backend.
 
 The tested surface is currently limited to one device, `torch.float32`,
 CPU-to-GPU and GPU-to-GPU copies, addition, multiplication, broadcasting, and
-explicit asynchronous readback. Unsupported operators raise errors; there is
-no implicit CPU fallback.
+metadata-only views, plus explicit asynchronous readback. Unsupported
+operators raise errors; there is no implicit CPU fallback.
 
 Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. Stock
 single-threaded Pyodide cannot turn that Promise into a synchronous PyTorch
@@ -61,6 +61,8 @@ The WebGPU backend:
   operators;
 - uses 32-bit shape, stride, and storage-offset metadata and supports at most
   eight dimensions;
+- rejects copies between different views of the same `GPUBuffer`; exact-alias
+  copies are no-ops and copies between distinct buffers are supported;
 - has only been validated with the repository's deterministic SwiftShader
   browser test so far.
 

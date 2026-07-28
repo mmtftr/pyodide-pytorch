@@ -1,15 +1,15 @@
-From f8c95fbdbc1ecd1d0049e0d535b0f74f2d8f7c25 Mon Sep 17 00:00:00 2001
+From 231eee8d2a3e46c8fab14c8816e3eab6e6826ea0 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Tue, 28 Jul 2026 18:36:20 +0200
+Date: Tue, 28 Jul 2026 18:59:51 +0200
 Subject: [PATCH 10/10] Add experimental browser WebGPU backend
 
 ---
  third_party/torch-webgpu/LICENSE     | 201 ++++++++
  torch/CMakeLists.txt                 |   4 +
  torch/__init__.py                    |   3 +
- torch/csrc/webgpu/webgpu_backend.cpp | 678 +++++++++++++++++++++++++++
- torch/webgpu/__init__.py             | 220 +++++++++
- 5 files changed, 1106 insertions(+)
+ torch/csrc/webgpu/webgpu_backend.cpp | 727 +++++++++++++++++++++++++++
+ torch/webgpu/__init__.py             | 220 ++++++++
+ 5 files changed, 1155 insertions(+)
  create mode 100644 third_party/torch-webgpu/LICENSE
  create mode 100644 torch/csrc/webgpu/webgpu_backend.cpp
  create mode 100644 torch/webgpu/__init__.py
@@ -253,10 +253,10 @@ index 10d44e6..addb63b 100644
  
 diff --git a/torch/csrc/webgpu/webgpu_backend.cpp b/torch/csrc/webgpu/webgpu_backend.cpp
 new file mode 100644
-index 0000000..2a466f9
+index 0000000..129c2ae
 --- /dev/null
 +++ b/torch/csrc/webgpu/webgpu_backend.cpp
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,727 @@
 +// Experimental browser WebGPU backend for the Pyodide build.
 +//
 +// Portions of the PrivateUse1 allocator/dispatch structure and binary
@@ -270,6 +270,9 @@ index 0000000..2a466f9
 +#include <ATen/ATen.h>
 +#include <ATen/EmptyTensor.h>
 +#include <ATen/TensorIterator.h>
++#include <ATen/core/grad_mode.h>
++#include <ATen/ops/as_strided_cpu_dispatch.h>
++#include <ATen/ops/view_cpu_dispatch.h>
 +#include <c10/core/Allocator.h>
 +#include <c10/core/Device.h>
 +#include <c10/core/Stream.h>
@@ -315,10 +318,12 @@ index 0000000..2a466f9
 +  if (!state || !state.buffers) {
 +    return;
 +  }
-+  // Do not call GPUBuffer.destroy() here. Submitted command buffers may still
-+  // retain this resource; dropping our registry reference lets WebGPU manage
-+  // its safe lifetime.
++  const buffer = state.buffers.get(id);
 +  state.buffers.delete(id);
++  if (buffer) {
++    // WebGPU defers physical release until already-submitted work is done.
++    buffer.destroy();
++  }
 +});
 +
 +EM_JS(
@@ -497,6 +502,7 @@ index 0000000..2a466f9
 +      pass.dispatchWorkgroups(dispatch_x >>> 0, dispatch_y >>> 0);
 +      pass.end();
 +      state.queue.submit([encoder.finish()]);
++      paramsBuffer.destroy();
 +      state.kernelSubmissions++;
 +      return 1;
 +    });
@@ -689,6 +695,23 @@ index 0000000..2a466f9
 +      size, stride, &allocator(), key_set, resolved_dtype);
 +}
 +
++at::Tensor as_strided(
++    const at::Tensor& tensor,
++    c10::SymIntArrayRef size,
++    c10::SymIntArrayRef stride,
++    std::optional<c10::SymInt> storage_offset) {
++  check_supported_tensor(tensor, "WebGPU as_strided", false);
++  return at::cpu::as_strided_symint(
++      tensor, size, stride, std::move(storage_offset));
++}
++
++at::Tensor view(
++    const at::Tensor& tensor,
++    c10::SymIntArrayRef size) {
++  check_supported_tensor(tensor, "WebGPU view", false);
++  return at::cpu::view_symint(tensor, size);
++}
++
 +at::Tensor copy_from(
 +    const at::Tensor& source,
 +    const at::Tensor& destination,
@@ -715,8 +738,9 @@ index 0000000..2a466f9
 +        destination.storage_offset() * destination.element_size();
 +    TORCH_CHECK(
 +        destination_offset >= 0 &&
-+            static_cast<std::size_t>(destination_offset) + nbytes <=
-+                destination_allocation.nbytes,
++            static_cast<std::uint64_t>(destination_offset) +
++                    static_cast<std::uint64_t>(nbytes) <=
++                static_cast<std::uint64_t>(destination_allocation.nbytes),
 +        "CPU to WebGPU copy exceeds destination storage");
 +    TORCH_CHECK(
 +        twgpu_write_buffer(
@@ -743,6 +767,25 @@ index 0000000..2a466f9
 +    const auto source_offset = source.storage_offset() * source.element_size();
 +    const auto destination_offset =
 +        destination.storage_offset() * destination.element_size();
++    TORCH_CHECK(
++        source_offset >= 0 &&
++            static_cast<std::uint64_t>(source_offset) +
++                    static_cast<std::uint64_t>(nbytes) <=
++                static_cast<std::uint64_t>(source_allocation.nbytes),
++        "WebGPU copy exceeds source storage");
++    TORCH_CHECK(
++        destination_offset >= 0 &&
++            static_cast<std::uint64_t>(destination_offset) +
++                    static_cast<std::uint64_t>(nbytes) <=
++                static_cast<std::uint64_t>(destination_allocation.nbytes),
++        "WebGPU copy exceeds destination storage");
++    if (source_allocation.id == destination_allocation.id) {
++      TORCH_CHECK(
++          source_offset == destination_offset,
++          "WebGPU copy between different views of the same GPUBuffer is not "
++          "supported");
++      return destination;
++    }
 +    TORCH_CHECK(
 +        twgpu_copy_buffer(
 +            source_allocation.id,
@@ -805,6 +848,10 @@ index 0000000..2a466f9
 +    float alpha = 1.0f) {
 +  check_supported_tensor(lhs, "WebGPU binary operation", false);
 +  check_supported_tensor(rhs, "WebGPU binary operation", false);
++  TORCH_CHECK(
++      !at::GradMode::is_enabled() ||
++          (!lhs.requires_grad() && !rhs.requires_grad()),
++      "WebGPU autograd is not supported; use `torch.no_grad()` for inference");
 +  const auto output_shape = at::infer_size(lhs.sizes(), rhs.sizes());
 +  auto output = at::empty(output_shape, lhs.options());
 +  if (output.numel() == 0) {
@@ -915,6 +962,8 @@ index 0000000..2a466f9
 +TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
 +  module.impl("empty.memory_format", TORCH_FN(empty_memory_format));
 +  module.impl("empty_strided", TORCH_FN(empty_strided));
++  module.impl("as_strided", TORCH_FN(as_strided));
++  module.impl("view", TORCH_FN(view));
 +  module.impl("_copy_from", TORCH_FN(copy_from));
 +  module.impl("add.Tensor", TORCH_FN(add));
 +  module.impl("mul.Tensor", TORCH_FN(multiply));
@@ -937,7 +986,7 @@ index 0000000..2a466f9
 +} // namespace torch_webgpu::emscripten_backend
 diff --git a/torch/webgpu/__init__.py b/torch/webgpu/__init__.py
 new file mode 100644
-index 0000000..b5421ac
+index 0000000..6671b34
 --- /dev/null
 +++ b/torch/webgpu/__init__.py
 @@ -0,0 +1,220 @@
@@ -987,7 +1036,7 @@ index 0000000..b5421ac
 +    state = getattr(_js().globalThis, "__torchWebGPU", None)
 +    if state is None:
 +        raise RuntimeError(
-+            "WebGPU is not initialized; call `await torch_webgpu.init()` first"
++            "WebGPU is not initialized; call `await torch.webgpu.init()` first"
 +        )
 +    return state
 +
@@ -1143,7 +1192,7 @@ index 0000000..b5421ac
 +torch.utils.generate_methods_for_privateuse1_backend(
 +    for_tensor=True,
 +    for_module=True,
-+    for_storage=True,
++    for_storage=False,
 +    for_packed_sequence=True,
 +)
 +

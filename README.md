@@ -128,6 +128,7 @@ The initial backend is intentionally narrow:
   eight dimensions;
 - GPU-native tensor addition and multiplication, including broadcasting,
   storage offsets, and `alpha` for addition;
+- metadata-only `view`, slice, and transpose operations;
 - CPU-to-GPU and GPU-to-GPU copies;
 - explicit asynchronous GPU-to-CPU readback through
   `await torch.webgpu.to_cpu_async(tensor)`;
