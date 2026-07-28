@@ -8,24 +8,24 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const ASSET_VERSION = "3";
+const ASSET_VERSION = "4";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
 const FALLBACK_RELEASE = Object.freeze({
-  releaseTag: "torch-2.13.0-pyodide-314.0.2-r3",
+  releaseTag: "torch-2.13.0-pyodide-314.0.2-r4",
   releaseUrl:
-    "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r3",
+    "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r4",
   wheelUrl: new URL(
-    "torch-2.13.0+pyodide314.0.2.r3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+    "torch-2.13.0+pyodide314.0.2.r4-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
     RUNTIME_BASE_URL,
   ).href,
   wheelName:
-    "torch-2.13.0+pyodide314.0.2.r3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
-  wheelSize: 27_205_621,
-  wheelSha256: "28d56f1d682919c7a1fc2766d3f260d205328e78fa781b0f45bb3847b10ab910",
+    "torch-2.13.0+pyodide314.0.2.r4-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+  wheelSize: 27_205_688,
+  wheelSha256: "f40cea64246a09d63d0ca10e5257bcb53ba1c9de442f674464b7289f01b292fa",
   pyodideVersion: "314.0.2",
-  torchVersion: "2.13.0+pyodide314.0.2.r3",
+  torchVersion: "2.13.0+pyodide314.0.2.r4",
 });
 
 const EXAMPLES = Object.freeze({

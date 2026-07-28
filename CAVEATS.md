@@ -36,7 +36,7 @@ for shared WebAssembly memory.
 
 ## Experimental WebGPU backend
 
-The `r3` release and development wheels built from `main` include an
+The `r4` release and development wheels built from `main` include an
 experimental `PrivateUse1` backend named `webgpu`. It submits real WGSL
 compute work through the browser WebGPU API, but it is not a general PyTorch
 accelerator backend.

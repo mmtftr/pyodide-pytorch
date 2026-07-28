@@ -10,7 +10,7 @@ Run PyTorch in a browser or another Pyodide environment. This repository
 produces a reproducible WebAssembly wheel, tests it inside the exact Pyodide
 runtime it targets, and publishes the wheel with checksums and build
 provenance. The main branch also contains an early browser WebGPU backend;
-the `r3` release makes that backend available in the playground.
+the `r4` release makes that backend available in the playground.
 
 **[Try the browser playground](https://mmtftr.github.io/pyodide-pytorch/)**
 · [Download the latest release](https://github.com/mmtftr/pyodide-pytorch/releases/latest)
@@ -24,11 +24,11 @@ the `r3` release makes that backend available in the playground.
 
 | Component | Version |
 | --- | --- |
-| PyTorch | `2.13.0+pyodide314.0.2.r3` |
+| PyTorch | `2.13.0+pyodide314.0.2.r4` |
 | Pyodide | `314.0.2` |
 | Python | `3.14.2` (`cp314`) |
 | WebAssembly platform | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r3` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r4` |
 
 The complete, ABI-relevant configuration lives in
 [`config/build.toml`](config/build.toml). A wheel is compatible only with the
@@ -106,7 +106,7 @@ on a CORS-enabled origin, and verify its published SHA-256 digest.
 
 ## Experimental WebGPU backend
 
-The `r3` release and development wheels built from `main` expose a real
+The `r4` release and development wheels built from `main` expose a real
 PyTorch `webgpu` device in browsers that implement WebGPU:
 
 ```python
@@ -153,7 +153,7 @@ native Dawn transport with an Emscripten JavaScript bridge embedded in
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| Experimental WebGPU (`r3`) | `float32` add/multiply, broadcasting, copies, and async readback |
+| Experimental WebGPU (`r4`) | `float32` add/multiply, broadcasting, copies, and async readback |
 | CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |
