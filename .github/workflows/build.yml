@@ -2,10 +2,8 @@ name: Build PyTorch wheel
 
 on:
   workflow_dispatch:
-  create:
   push:
     branches: [main]
-    tags: ["torch-*-pyodide-*"]
     paths:
       - "config/**"
       - "patches/**"
@@ -15,23 +13,16 @@ on:
 
 concurrency:
   group: pytorch-pyodide-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'create' }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
   attestations: write
   statuses: write
 
 jobs:
   build:
-    if: >-
-      github.event_name != 'create' ||
-      (
-        github.event.ref_type == 'branch' &&
-        startsWith(github.event.ref, 'release/torch-') &&
-        contains(github.event.ref, '-pyodide-')
-      )
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -49,29 +40,6 @@ jobs:
           python3 scripts/config.py check
           python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
           python3 scripts/config.py env >> "$GITHUB_ENV"
-
-      - name: Verify release request
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
-        env:
-          CREATED_REF: ${{ github.event.ref }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            requested_tag="${CREATED_REF#release/}"
-          else
-            requested_tag="$GITHUB_REF_NAME"
-          fi
-          if [[ "$requested_tag" != "$RELEASE_TAG" ]]; then
-            echo "::error::Requested release $requested_tag does not match pinned $RELEASE_TAG"
-            exit 1
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            git fetch --no-tags --depth=1 origin main
-            main_sha="$(git rev-parse FETCH_HEAD)"
-            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
-              echo "::error::Release branches must point at the current main commit $main_sha"
-              exit 1
-            fi
-          fi
 
       - name: Check out pinned PyTorch source
         uses: actions/checkout@v7
@@ -329,7 +297,7 @@ jobs:
           retention-days: 14
           compression-level: 0
 
-      - name: Upload wheel and provenance
+      - name: Upload verified release candidate
         uses: actions/upload-artifact@v7
         with:
           name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
@@ -338,46 +306,13 @@ jobs:
           retention-days: 90
           compression-level: 0
 
-      - name: Attest wheel provenance
-        # GitHub does not provide artifact attestations for user-owned private
-        # repositories. Release publication must not discard an otherwise
-        # verified wheel; attestations become mandatory once the repo is public.
-        if: github.event.repository.visibility == 'public'
+      - name: Attest release candidate
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             wheelhouse/dist/*.whl
             wheelhouse/dist/*.sha256
             wheelhouse/dist/build-manifest.json
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            if tag_ref="$(
-              gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-                --jq '.object.type + " " + .object.sha' 2>/dev/null
-            )"; then
-              :
-            else
-              tag_ref=""
-            fi
-            if [[ -z "$tag_ref" ]]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                -f ref="refs/tags/$RELEASE_TAG" \
-                -f sha="$GITHUB_SHA" >/dev/null
-            elif [[ "$tag_ref" != "commit $GITHUB_SHA" ]]; then
-              echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
-              exit 1
-            fi
-          fi
-          gh release create "$RELEASE_TAG" \
-            --verify-tag \
-            --generate-notes \
-            --title "$RELEASE_TAG" \
-            wheelhouse/dist/*
 
       - name: Upload CMake diagnostics after failure
         if: failure()

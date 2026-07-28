@@ -1,0 +1,269 @@
+name: Publish verified release artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact release tag from config/build.toml
+        required: true
+        type: string
+      build_run_id:
+        description: Successful main-branch build run ID; blank selects the latest
+        required: false
+        type: string
+      prerelease:
+        description: Publish as a prerelease
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: pytorch-pyodide-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  attestations: read
+  contents: write
+
+jobs:
+  publish:
+    name: Verify and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: release
+      url: ${{ steps.publish.outputs.url }}
+    steps:
+      - name: Resolve source build
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run the release workflow from the main branch"
+            exit 1
+          fi
+
+          expected_workflow_id="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml" \
+              --jq '.id'
+          )"
+
+          if [[ -n "$REQUESTED_RUN_ID" ]]; then
+            if [[ ! "$REQUESTED_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::build_run_id must be a positive integer"
+              exit 1
+            fi
+            build_run_id="$REQUESTED_RUN_ID"
+          else
+            runs_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs?branch=main&status=success&per_page=100"
+            )"
+            build_run_id="$(
+              jq -r '.workflow_runs[0].id // empty' <<< "$runs_json"
+            )"
+            if [[ -z "$build_run_id" ]]; then
+              echo "::error::No successful main-branch build workflow run was found"
+              exit 1
+            fi
+          fi
+
+          run_json="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$build_run_id"
+          )"
+
+          expect_equal() {
+            local label="$1"
+            local actual="$2"
+            local expected="$3"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::$label did not match the required release source"
+              exit 1
+            fi
+          }
+
+          actual_workflow_id="$(jq -r '.workflow_id // empty' <<< "$run_json")"
+          build_status="$(jq -r '.status // empty' <<< "$run_json")"
+          build_conclusion="$(jq -r '.conclusion // empty' <<< "$run_json")"
+          build_branch="$(jq -r '.head_branch // empty' <<< "$run_json")"
+          build_sha="$(jq -r '.head_sha // empty' <<< "$run_json")"
+          build_repository="$(
+            jq -r '.head_repository.full_name // empty' <<< "$run_json"
+          )"
+          build_event="$(jq -r '.event // empty' <<< "$run_json")"
+          build_run_url="$(jq -r '.html_url // empty' <<< "$run_json")"
+
+          expect_equal workflow "$actual_workflow_id" "$expected_workflow_id"
+          expect_equal status "$build_status" completed
+          expect_equal conclusion "$build_conclusion" success
+          expect_equal branch "$build_branch" main
+          expect_equal repository "$build_repository" "$GITHUB_REPOSITORY"
+          if [[ "$build_event" != push && "$build_event" != workflow_dispatch ]]; then
+            echo "::error::The build must originate from a push or manual main-branch run"
+            exit 1
+          fi
+          if [[ ! "$build_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The build workflow returned an invalid commit SHA"
+            exit 1
+          fi
+
+          {
+            echo "build_run_id=$build_run_id"
+            echo "build_sha=$build_sha"
+            echo "build_run_url=$build_run_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact build commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.source.outputs.build_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the build commit is on main
+        env:
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BUILD_SHA"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$BUILD_SHA" origin/main; then
+            echo "::error::The selected build commit is not an ancestor of main"
+            exit 1
+          fi
+
+      - name: Read and confirm release configuration
+        id: config
+        env:
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+          configured_tag="$(python3 scripts/config.py get RELEASE_TAG)"
+          if [[ "$REQUESTED_RELEASE_TAG" != "$configured_tag" ]]; then
+            echo "::error::release_tag must exactly match config/build.toml"
+            exit 1
+          fi
+
+      - name: Download verified build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
+          path: ${{ runner.temp }}/release-artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.build_run_id }}
+
+      - name: Revalidate artifact contents
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_release_artifact.py \
+            "$ARTIFACT_DIR" \
+            --builder-commit "$BUILD_SHA"
+
+      - name: Verify build attestations
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          signer_workflow="$(
+            printf '%s/%s/.github/workflows/build.yml' \
+              "${GITHUB_SERVER_URL#https://}" \
+              "$GITHUB_REPOSITORY"
+          )"
+          verified=0
+          while IFS= read -r -d '' artifact; do
+            gh attestation verify "$artifact" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-ref refs/heads/main \
+              --source-digest "$BUILD_SHA" \
+              --deny-self-hosted-runners
+            verified=$((verified + 1))
+          done < <(
+            find "$ARTIFACT_DIR" -maxdepth 1 -type f -print0
+          )
+          test "$verified" -eq 3
+
+      - name: Verify release destination is unused
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists and is immutable"
+            exit 1
+          fi
+          existing_tag="$(
+            git ls-remote --tags origin "refs/tags/$RELEASE_TAG"
+          )"
+          if [[ -n "$existing_tag" ]]; then
+            echo "::error::Tag $RELEASE_TAG already exists"
+            exit 1
+          fi
+
+      - name: Publish immutable GitHub Release
+        id: publish
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/release-artifacts
+          BUILD_RUN_URL: ${{ steps.source.outputs.build_run_url }}
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(
+            find "$ARTIFACT_DIR" -maxdepth 1 -type f -print | sort
+          )
+          test "${#assets[@]}" -eq 3
+
+          release_args=(
+            --target "$BUILD_SHA"
+            --generate-notes
+            --title "$RELEASE_TAG"
+            --notes "Verified build: $BUILD_RUN_URL"
+          )
+          if [[ "$PRERELEASE" == true ]]; then
+            release_args+=(--prerelease)
+          else
+            release_args+=(--latest)
+          fi
+
+          gh release create \
+            "$RELEASE_TAG" \
+            "${release_args[@]}" \
+            "${assets[@]}"
+          release_url="$(
+            gh release view "$RELEASE_TAG" --json url --jq '.url'
+          )"
+          echo "url=$release_url" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize release
+        env:
+          BUILD_RUN_ID: ${{ steps.source.outputs.build_run_id }}
+          BUILD_SHA: ${{ steps.source.outputs.build_sha }}
+          RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.publish.outputs.url }}
+        run: |
+          {
+            echo "## Published $RELEASE_TAG"
+            echo
+            echo "- Release: $RELEASE_URL"
+            echo "- Build run: $BUILD_RUN_ID"
+            echo "- Commit: \`$BUILD_SHA\`"
+            echo "- Manifest, checksums, and three build attestations verified"
+          } >> "$GITHUB_STEP_SUMMARY"

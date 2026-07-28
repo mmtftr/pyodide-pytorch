@@ -161,22 +161,47 @@ deployment must invalidate the application shell.
 
 ## Release artifacts
 
-Each GitHub release contains:
+Each successful build stages an Actions artifact containing:
 
 - the PyTorch wheel;
 - a SHA-256 file for the wheel;
 - `build-manifest.json`, including the source commit, full build
   configuration, input hashes, wheel filename, size, and digest;
-- a GitHub artifact attestation when supported by the repository
-  configuration.
+- a GitHub artifact attestation for each file.
 
-The release workflow revalidates downloaded artifacts before publication and
-does not overwrite an existing release.
+The build workflow validates and attests this release candidate, but it does
+not create a tag or GitHub Release.
+
+### Publishing a release
+
+1. Merge the version pins, patch series, and release tag into `main`.
+2. Wait for a successful **Build PyTorch wheel** run on `main`, or dispatch
+   that workflow manually from `main`.
+3. Run **Publish verified release artifact** and enter the exact release tag
+   from `config/build.toml`. Optionally enter the successful build run ID;
+   otherwise, the workflow selects the latest successful `main` build.
+4. Select the prerelease option only when the release should not become the
+   latest stable release.
+
+The release workflow accepts only a successful build from this repository's
+canonical build workflow on `main`, and the built commit must still be an
+ancestor of `main`. It checks out that exact commit, downloads that run's
+artifact, and independently verifies the manifest, checksum, configuration,
+input hashes, and attestations. It then creates the tag at the verified build
+commit and uploads exactly the three files above.
+
+Tags and releases are immutable in this workflow: publication stops if either
+already exists. To correct a release candidate, update `config/build.toml`
+with a new tag, build again, and publish the new candidate.
+
+Before the first publication, configure the repository's `release` environment
+to allow deployments only from `main`. Requiring a maintainer's approval for
+that environment adds a second confirmation before the write-enabled job runs.
 
 The Pages workflow downloads the current release, verifies it with
 [`scripts/verify_release_artifact.py`](../scripts/verify_release_artifact.py),
-and deploys the wheel beside the playground. Browser requests therefore use a
-same-origin wheel URL.
+and deploys the wheel beside the playground after the release workflow
+succeeds. Browser requests therefore use a same-origin wheel URL.
 
 ## Updating versions
 
@@ -189,7 +214,7 @@ version update:
 4. run the fast checks and patch-applicability job;
 5. produce a new wheel with the full build workflow;
 6. pass binary validation, smoke tests, and the selected upstream suite;
-7. publish a new release tag and manifest;
+7. run the release workflow with the configured tag and successful build;
 8. update the version table in the README and compatibility documentation.
 
 The runtime, cross-build environment, Python tag, platform tag, and Emscripten
@@ -206,7 +231,7 @@ pin must be updated and tested as one ABI tuple.
 | `scripts/fetch_lapack.py` | Pinned Pyodide LAPACK download and verification |
 | `scripts/postprocess_wheel.py` | Deterministic pruning and repacking |
 | `scripts/validate_wheel.py` | Wheel and WebAssembly validation |
-| `scripts/verify_release_artifact.py` | Release digest, manifest, and input verification |
+| `scripts/verify_release_artifact.py` | Release artifact verification |
 | `tests/` | Repository, smoke, and selected upstream tests |
 | `docs/` | Compatibility, testing, and maintainer documentation |
 | `site/` | Browser playground source |

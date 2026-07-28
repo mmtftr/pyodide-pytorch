@@ -81,6 +81,9 @@ A version bump is an ABI change, not a metadata-only edit:
    request.
 6. Update the README and compatibility table only after the new wheel passes
    binary, smoke, and upstream runtime validation.
+7. After the change is merged, run **Publish verified release artifact** with
+   the exact configured release tag and successful build run ID. Do not create
+   the release tag manually.
 
 See [`docs/building.md`](docs/building.md) for the canonical pipeline.
 
