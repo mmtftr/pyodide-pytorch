@@ -141,7 +141,8 @@ CUDA compatibility and `torch.cuda.is_available()` remains false.
 The backend follows the allocator, device-guard, and WGSL dispatch structure
 of [torch-webgpu](https://github.com/jmaczan/torch-webgpu), replacing its
 native Dawn transport with an Emscripten JavaScript bridge embedded in
-`torch._C`.
+`torch._C`. The adapted portions are distributed under Apache-2.0; see
+[Third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## What works
 
@@ -204,4 +205,6 @@ and every probed test not admitted to CI are documented in
 The build scripts, patches, tests, and playground code in this repository are
 available under the [MIT License](LICENSE). PyTorch remains under its upstream
 BSD-3-Clause license, and bundled dependencies retain their respective
-licenses. PyTorch names and trademarks belong to their respective owners.
+licenses. The experimental WebGPU patch includes Apache-2.0-licensed portions
+adapted from `torch-webgpu`; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+PyTorch names and trademarks belong to their respective owners.
