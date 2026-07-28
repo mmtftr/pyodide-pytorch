@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     paths:
+      - "README.md"
+      - "CAVEATS.md"
+      - "CONTRIBUTING.md"
+      - "LICENSE"
+      - "SECURITY.md"
+      - "docs/**"
       - "config/**"
       - "patches/**"
       - "scripts/**"

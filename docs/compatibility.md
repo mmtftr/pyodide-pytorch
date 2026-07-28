@@ -1,43 +1,72 @@
-# Compatibility and scope
+# Compatibility and tested scope
 
-Each wheel is tied to one CPython/Emscripten ABI. The pinned upgrade target is:
+Every wheel is built for one exact CPython and Pyodide WebAssembly ABI. The
+current release uses the following tuple:
 
 | Component | Pin |
 | --- | --- |
-| PyTorch | `cf30153c4c131c8164ee7798e5022d810682e2cb` (`2.13.0`) |
+| PyTorch source | `cf30153c4c131c8164ee7798e5022d810682e2cb` (`2.13.0`) |
+| Wheel version | `2.13.0+pyodide314.0.2` |
 | Pyodide | `314.0.2` |
-| pyodide-build | `0.36.0` |
+| `pyodide-build` | `0.36.0` |
 | CPython | `3.14.2` / `cp314` |
 | Platform tag | `pyemscripten_2026_0_wasm32` |
 | Emscripten | `5.0.3` |
+| LAPACK | Pyodide `libopenblas` `0.3.28` |
+| `auditwheel-emscripten` | `0.2.5` |
 | Wheel | `0.47.0` |
 | Ninja | `1.13.0` |
-| CMake | `3.27.9` (satisfies PyTorch 2.13's CMake 3.27 minimum) |
+| CMake | `3.27.9` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r2` |
 
-Only patch applicability against this exact PyTorch commit has been validated
-at this revision. The target remains provisional until the canonical CI full
-build passes binary validation and the runtime smoke suite in Pyodide 314.0.2.
-The build explicitly mirrors PyTorch 2.13's C++20 and C17 language-standard
-requirements. Exception handling follows the Pyodide 314 ABI
-(`-fwasm-exceptions` with Wasm `longjmp` support); the patch series removes
-PyTorch's incompatible legacy `DISABLE_EXCEPTION_CATCHING` setting.
-LAPACK follows Pyodide's `f2c` ABI: Fortran subroutines have an `i32` result
-instead of the native Fortran `void` result. Although callers ignore that
-result, WebAssembly includes it in the function type and rejects mismatched
+[`config/build.toml`](../config/build.toml) is the machine-readable source of
+truth. This document describes the release for humans and must be updated when
+that configuration changes.
+
+## Compatibility boundary
+
+The `pyemscripten` platform tag is the compatibility boundary. Matching the
+raw Emscripten version alone does not establish compatibility because Pyodide
+versions can differ in CPython, linked side modules, compiler flags, and
+platform ABI.
+
+A wheel must be rebuilt and retested when any ABI-relevant member of the tuple
+changes. It must not be renamed or loaded into a different native or
+WebAssembly Python runtime on the assumption that the import tags are close
+enough.
+
+The build uses PyTorch 2.13's C++20 and C17 language standards. Exception
+handling follows the Pyodide 314 ABI (`-fwasm-exceptions` with WebAssembly
+`longjmp` support); the patch series removes PyTorch's incompatible legacy
+`DISABLE_EXCEPTION_CATCHING` setting.
+
+## Tested runtime scope
+
+Release `torch-2.13.0-pyodide-314.0.2-r2` passed:
+
+- wheel metadata and WebAssembly binary validation;
+- the repository runtime smoke suite;
+- 654 selected upstream PyTorch CPU tests;
+- 71 selected LAPACK-backed `torch.linalg` tests across real and complex,
+  single- and double-precision dtypes;
+- version, Emscripten platform, and single-thread invariants.
+
+The selected upstream gate permits no runtime skips, expected failures,
+failures, errors, or unexpected successes. See
+[`docs/upstream-tests.md`](upstream-tests.md) for the exact inventory and all
+explicit exclusions.
+
+## Deliberate build constraints
+
+The wheel is CPU-only and has no WebAssembly shared memory. Both ATen thread
+counts are fixed at one, and inter-op work runs inline.
+
+LAPACK uses Pyodide's `f2c` ABI: Fortran subroutines have an `i32` result rather
+than the native Fortran `void` result. Although callers ignore that result,
+WebAssembly includes it in the function type and rejects mismatched
 declarations at link time.
 
-The wheel is CPU-only and intentionally has no WebAssembly shared memory. Both
-ATen thread counts are fixed at one, and inter-op work runs inline. Requests to
-set either count above one raise `RuntimeError`. This avoids the cross-origin
-isolation and worker requirements of pthread-enabled Wasm.
-
-Unsupported or intentionally omitted areas include CUDA/ROCm, distributed
-training, multiprocessing/shared-memory tensors, OpenMP, MKL/MKLDNN, NNPACK,
-QNNPACK, XNNPACK, FBGEMM, Kineto, standalone functorch, C++ extension builds,
-and command-line programs such as `torchrun`. APIs in those areas may still be
-importable but are not functional.
-
-The `pyemscripten` platform ABI is the compatibility boundary; the raw
-Emscripten version alone is not a wheel tag. A new Pyodide ABI therefore
-requires a new build entry and a fresh runtime test; it must not reuse or
-rename an old wheel.
+Unsupported areas include accelerator backends, distributed training,
+multiprocessing, shared-memory tensors, `torch.compile`, runtime C++
+extensions, and multithreaded CPU execution. The full user-visible limitation
+list is maintained in [CAVEATS.md](../CAVEATS.md).
