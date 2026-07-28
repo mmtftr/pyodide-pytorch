@@ -8,8 +8,8 @@ Subject: [PATCH 10/10] Add experimental browser WebGPU backend
  torch/CMakeLists.txt                 |   4 +
  torch/__init__.py                    |   3 +
  torch/csrc/webgpu/webgpu_backend.cpp | 727 +++++++++++++++++++++++++++
- torch/webgpu/__init__.py             | 220 ++++++++
- 5 files changed, 1155 insertions(+)
+ torch/webgpu/__init__.py             | 222 ++++++++
+ 5 files changed, 1157 insertions(+)
  create mode 100644 third_party/torch-webgpu/LICENSE
  create mode 100644 torch/csrc/webgpu/webgpu_backend.cpp
  create mode 100644 torch/webgpu/__init__.py
@@ -989,7 +989,7 @@ new file mode 100644
 index 0000000..6671b34
 --- /dev/null
 +++ b/torch/webgpu/__init__.py
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,222 @@
 +"""Experimental browser WebGPU backend for the Pyodide PyTorch build.
 +
 +GPU storage and ATen dispatch are implemented in C++ using PyTorch's
@@ -1050,12 +1050,14 @@ index 0000000..6671b34
 +        return
 +    if device is None:
 +        gpu = getattr(_js().navigator, "gpu", None)
-+        if gpu is None:
++        if not gpu:
 +            raise RuntimeError("WebGPU is not exposed by this browser/runtime")
 +        _adapter = await gpu.requestAdapter(
 +            _js_object(powerPreference="high-performance")
 +        )
-+        if _adapter is None:
++        # Pyodide 314 represents JavaScript null as the falsey `jsnull`
++        # singleton rather than Python None.
++        if not _adapter:
 +            raise RuntimeError("the browser did not provide a WebGPU adapter")
 +        device = await _adapter.requestDevice()
 +
@@ -1144,7 +1146,7 @@ index 0000000..6671b34
 +    if is_initialized():
 +        return True
 +    try:
-+        return getattr(_js().navigator, "gpu", None) is not None
++        return bool(getattr(_js().navigator, "gpu", None))
 +    except RuntimeError:
 +        return False
 +
@@ -1212,4 +1214,3 @@ index 0000000..6671b34
 +]
 -- 
 2.51.1
-
