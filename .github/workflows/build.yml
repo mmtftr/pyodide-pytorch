@@ -330,20 +330,10 @@ jobs:
               -print
           )
           test "${#filelock_wheels[@]}" -eq 1
-          mapfile -t pyodide_modules < <(
-            find .pyodide-xbuildenv \
-              -type f \
-              -path '*/pyodide-root/dist/pyodide.mjs' \
-              -print
-          )
-          test "${#pyodide_modules[@]}" -ge 1
-          pyodide_module="${pyodide_modules[0]}"
-          for candidate in "${pyodide_modules[@]}"; do
-            if (( ${#candidate} < ${#pyodide_module} )); then
-              pyodide_module="$candidate"
-            fi
-          done
-          pyodide_dist="$(dirname "$pyodide_module")"
+          # The Node smoke test above downloads the pinned Pyodide packages
+          # into this cache. Unlike an xbuildenv dist directory, it is therefore
+          # a complete, browser-servable runtime rather than core files only.
+          pyodide_dist="$GITHUB_WORKSPACE/node_modules/pyodide"
           node tests/webgpu.mjs \
             "${{ steps.wheel.outputs.path }}" \
             "${filelock_wheels[0]}" \

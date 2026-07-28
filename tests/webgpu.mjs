@@ -5,6 +5,14 @@ import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer-core";
 
 const MAX_ERROR_CHARACTERS = 4_000;
+const REQUIRED_PYODIDE_PACKAGES = [
+  "numpy",
+  "typing-extensions",
+  "sympy",
+  "networkx",
+  "jinja2",
+  "fsspec",
+];
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 
 function existingFile(candidates) {
@@ -34,6 +42,7 @@ if (!wheelArgument || !filelockArgument || !pyodideArgument) {
 const wheel = path.resolve(wheelArgument);
 const filelockWheel = path.resolve(filelockArgument);
 const pyodideDirectory = path.resolve(pyodideArgument);
+const pyodideLock = path.join(pyodideDirectory, "pyodide-lock.json");
 const chrome = existingFile([
   process.env.CHROME_PATH,
   "/usr/bin/google-chrome",
@@ -45,11 +54,47 @@ for (const [label, filename] of [
   ["wheel", wheel],
   ["filelock wheel", filelockWheel],
   ["Pyodide package", path.join(pyodideDirectory, "pyodide.mjs")],
+  ["Pyodide lock file", pyodideLock],
   ["Chrome", chrome],
 ]) {
   if (!filename || !fs.existsSync(filename)) {
     throw new Error(`${label} does not exist: ${filename}`);
   }
+}
+
+const pyodidePackages = JSON.parse(
+  fs.readFileSync(pyodideLock, "utf8"),
+).packages;
+const pendingPackages = [...REQUIRED_PYODIDE_PACKAGES];
+const requiredPackageFiles = new Set();
+const visitedPackages = new Set();
+while (pendingPackages.length !== 0) {
+  const packageName = pendingPackages.pop();
+  if (visitedPackages.has(packageName)) {
+    continue;
+  }
+  visitedPackages.add(packageName);
+  const packageMetadata = pyodidePackages[packageName];
+  if (packageMetadata === undefined) {
+    throw new Error(`Pyodide lock file has no package named ${packageName}`);
+  }
+  const packageFile = packageMetadata.file_name;
+  if (path.basename(packageFile) !== packageFile) {
+    throw new Error(
+      `Pyodide package ${packageName} has a non-local file: ${packageFile}`,
+    );
+  }
+  requiredPackageFiles.add(packageFile);
+  pendingPackages.push(...packageMetadata.depends);
+}
+const missingPackageFiles = [...requiredPackageFiles].filter(
+  (packageFile) => !fs.existsSync(path.join(pyodideDirectory, packageFile)),
+);
+if (missingPackageFiles.length !== 0) {
+  throw new Error(
+    "Pyodide distribution is missing browser dependency files: " +
+      missingPackageFiles.sort().join(", "),
+  );
 }
 
 const contentTypes = new Map([
