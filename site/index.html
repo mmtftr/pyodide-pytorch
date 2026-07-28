@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Run Python with the PyTorch WebAssembly wheel in a Pyodide worker."
+      content="Run PyTorch on WebAssembly CPU or experimental WebGPU in a Pyodide worker."
     />
     <meta name="theme-color" content="#111318" />
     <title>PyTorch / Pyodide Playground</title>
     <link rel="stylesheet" href="./styles.css" />
-    <script type="module" src="./app.js?v=2"></script>
+    <script type="module" src="./app.js?v=3"></script>
   </head>
   <body>
     <header class="app-header">
@@ -18,7 +18,9 @@
         <span class="project-icon" aria-hidden="true">Py</span>
         <div>
           <h1>PyTorch / Pyodide Playground</h1>
-          <p>Python 3.14 · WebAssembly · CPU · single worker</p>
+          <p>
+            Python 3.14 · WebAssembly CPU · experimental WebGPU · single worker
+          </p>
         </div>
       </div>
 
@@ -60,6 +62,7 @@
               <option value="autograd">Tensor and autograd</option>
               <option value="training">Train a small network</option>
               <option value="linalg">Linear algebra</option>
+              <option value="webgpuBenchmark">WebGPU benchmark</option>
             </select>
           </div>
           <div class="pane-actions">

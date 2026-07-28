@@ -10,7 +10,7 @@ Run PyTorch in a browser or another Pyodide environment. This repository
 produces a reproducible WebAssembly wheel, tests it inside the exact Pyodide
 runtime it targets, and publishes the wheel with checksums and build
 provenance. The main branch also contains an early browser WebGPU backend;
-the current `r2` release remains CPU-only.
+the `r3` release makes that backend available in the playground.
 
 **[Try the browser playground](https://mmtftr.github.io/pyodide-pytorch/)**
 · [Download the latest release](https://github.com/mmtftr/pyodide-pytorch/releases/latest)
@@ -24,11 +24,11 @@ the current `r2` release remains CPU-only.
 
 | Component | Version |
 | --- | --- |
-| PyTorch | `2.13.0+pyodide314.0.2` |
+| PyTorch | `2.13.0+pyodide314.0.2.r3` |
 | Pyodide | `314.0.2` |
 | Python | `3.14.2` (`cp314`) |
 | WebAssembly platform | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r2` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r3` |
 
 The complete, ABI-relevant configuration lives in
 [`config/build.toml`](config/build.toml). A wheel is compatible only with the
@@ -43,8 +43,8 @@ verified release in a Web Worker and provides:
 - a CodeMirror Python editor and separate output console;
 - autocompletion with `Tab` or `Ctrl+Space`;
 - runtime-derived signatures and documentation on hover;
-- examples for tensors, autograd, neural networks, optimization, and
-  `torch.linalg`;
+- examples for tensors, autograd, neural networks, optimization,
+  `torch.linalg`, and a CPU-versus-WebGPU elementwise benchmark;
 - restart, cancellation, and versioned browser caching.
 
 The first load downloads Pyodide, its Python dependencies, and the PyTorch
@@ -106,8 +106,8 @@ on a CORS-enabled origin, and verify its published SHA-256 digest.
 
 ## Experimental WebGPU backend
 
-Development wheels built from `main` expose a real PyTorch `webgpu` device in
-browsers that implement WebGPU:
+The `r3` release and development wheels built from `main` expose a real
+PyTorch `webgpu` device in browsers that implement WebGPU:
 
 ```python
 import torch
@@ -153,7 +153,7 @@ native Dawn transport with an Emscripten JavaScript bridge embedded in
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| Experimental WebGPU (`main` development wheel) | `float32` add/multiply, broadcasting, copies, and async readback |
+| Experimental WebGPU (`r3`) | `float32` add/multiply, broadcasting, copies, and async readback |
 | CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |
@@ -175,7 +175,10 @@ series. CI then:
    and LAPACK-backed linear algebra;
 3. runs 654 selected upstream PyTorch CPU tests with zero runtime skips,
    expected failures, failures, or errors;
-4. publishes a SHA-256 digest, a machine-readable build manifest, and a GitHub
+4. runs real add, multiply, broadcast, view, copy, and readback operations in
+   Chromium with SwiftShader WebGPU and requires zero validation errors or
+   implicit CPU fallbacks;
+5. publishes a SHA-256 digest, a machine-readable build manifest, and a GitHub
    artifact attestation.
 
 The selected suite is deliberately auditable. All 16 generated-test exclusions

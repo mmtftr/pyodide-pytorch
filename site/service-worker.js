@@ -1,12 +1,12 @@
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const SHELL_CACHE = `${CACHE_PREFIX}shell-v2`;
-const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v1`;
+const SHELL_CACHE = `${CACHE_PREFIX}shell-v3`;
+const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v2`;
 const SHELL_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
-  "./app.js?v=2",
-  "./worker.js?v=2",
+  "./app.js?v=3",
+  "./worker.js?v=3",
 ];
 
 async function put(cacheName, request, response) {

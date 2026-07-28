@@ -8,24 +8,24 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const ASSET_VERSION = "2";
+const ASSET_VERSION = "3";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
 const FALLBACK_RELEASE = Object.freeze({
-  releaseTag: "torch-2.13.0-pyodide-314.0.2-r1",
+  releaseTag: "torch-2.13.0-pyodide-314.0.2-r3",
   releaseUrl:
-    "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r1",
+    "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r3",
   wheelUrl: new URL(
-    "torch-2.13.0+pyodide314.0.2-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+    "torch-2.13.0+pyodide314.0.2.r3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
     RUNTIME_BASE_URL,
   ).href,
   wheelName:
-    "torch-2.13.0+pyodide314.0.2-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
-  wheelSize: 25_038_799,
-  wheelSha256: "8691f0276528a7deee66c3abae3d21824ff8f2d20c9173142957bf04334af2a3",
+    "torch-2.13.0+pyodide314.0.2.r3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+  wheelSize: 27_205_621,
+  wheelSha256: "28d56f1d682919c7a1fc2766d3f260d205328e78fa781b0f45bb3847b10ab910",
   pyodideVersion: "314.0.2",
-  torchVersion: "2.13.0+pyodide314.0.2",
+  torchVersion: "2.13.0+pyodide314.0.2.r3",
 });
 
 const EXAMPLES = Object.freeze({
@@ -90,6 +90,62 @@ print("inverse check:")
 print((matrix @ inverse).round(decimals=5))
 `,
   },
+  webgpuBenchmark: {
+    filename: "webgpu_benchmark.py",
+    code: `import time
+import torch
+
+if not torch.webgpu.is_available():
+    raise RuntimeError("WebGPU is not available in this browser")
+
+await torch.webgpu.init()
+
+elements = 1_048_576
+iterations = 10
+left_cpu = torch.arange(elements, dtype=torch.float32)
+right_cpu = torch.full((elements,), 0.5, dtype=torch.float32)
+
+started = time.perf_counter()
+for _ in range(iterations):
+    expected = left_cpu * right_cpu + left_cpu
+cpu_ms = (time.perf_counter() - started) * 1_000
+
+upload_started = time.perf_counter()
+left = left_cpu.to("webgpu")
+right = right_cpu.to("webgpu")
+upload_ms = (time.perf_counter() - upload_started) * 1_000
+
+# Warm up pipeline creation before timing.
+warmup = left * right + left
+await torch.webgpu.synchronize()
+
+first_kernel = torch.webgpu.kernel_submissions()
+started = time.perf_counter()
+for _ in range(iterations):
+    result = left * right + left
+await torch.webgpu.synchronize()
+webgpu_ms = (time.perf_counter() - started) * 1_000
+kernels = torch.webgpu.kernel_submissions() - first_kernel
+
+readback_started = time.perf_counter()
+result_cpu = await torch.webgpu.to_cpu_async(result)
+readback_ms = (time.perf_counter() - readback_started) * 1_000
+torch.testing.assert_close(result_cpu, expected)
+
+print(f"elements: {elements:,} · iterations: {iterations}")
+print(f"CPU:    {cpu_ms:.1f} ms total · {cpu_ms / iterations:.2f} ms/iteration")
+print(
+    f"WebGPU: {webgpu_ms:.1f} ms total · "
+    f"{webgpu_ms / iterations:.2f} ms/iteration"
+)
+print(f"compute speedup (transfers excluded): {cpu_ms / webgpu_ms:.2f}x")
+print(f"one-time upload: {upload_ms:.1f} ms · final readback: {readback_ms:.1f} ms")
+print(
+    f"submitted kernels: {kernels} · "
+    f"implicit CPU fallbacks: {torch.webgpu.cpu_fallbacks()}"
+)
+`,
+  },
 });
 
 const COMMON_COMPLETIONS = [
@@ -126,6 +182,26 @@ const COMMON_COMPLETIONS = [
   { label: "torch.linalg", type: "module" },
   { label: "torch.linalg.inv", type: "function" },
   { label: "torch.linalg.eigvalsh", type: "function" },
+  {
+    label: "torch.webgpu",
+    type: "module",
+    detail: "Experimental browser WebGPU backend",
+  },
+  {
+    label: "torch.webgpu.init",
+    type: "function",
+    detail: "await torch.webgpu.init()",
+  },
+  {
+    label: "torch.webgpu.synchronize",
+    type: "function",
+    detail: "await torch.webgpu.synchronize()",
+  },
+  {
+    label: "torch.webgpu.to_cpu_async",
+    type: "function",
+    detail: "await torch.webgpu.to_cpu_async(tensor)",
+  },
 ];
 
 const STATIC_DOCUMENTATION = new Map(

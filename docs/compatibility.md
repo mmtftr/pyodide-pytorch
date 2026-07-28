@@ -6,7 +6,7 @@ current release uses the following tuple:
 | Component | Pin |
 | --- | --- |
 | PyTorch source | `cf30153c4c131c8164ee7798e5022d810682e2cb` (`2.13.0`) |
-| Wheel version | `2.13.0+pyodide314.0.2` |
+| Wheel version | `2.13.0+pyodide314.0.2.r3` |
 | Pyodide | `314.0.2` |
 | `pyodide-build` | `0.36.0` |
 | CPython | `3.14.2` / `cp314` |
@@ -17,7 +17,7 @@ current release uses the following tuple:
 | Wheel | `0.47.0` |
 | Ninja | `1.13.0` |
 | CMake | `3.27.9` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r2` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r3` |
 
 [`config/build.toml`](../config/build.toml) is the machine-readable source of
 truth. This document describes the release for humans and must be updated when
@@ -42,13 +42,16 @@ handling follows the Pyodide 314 ABI (`-fwasm-exceptions` with WebAssembly
 
 ## Tested runtime scope
 
-Release `torch-2.13.0-pyodide-314.0.2-r2` passed:
+Release `torch-2.13.0-pyodide-314.0.2-r3` passed:
 
 - wheel metadata and WebAssembly binary validation;
 - the repository runtime smoke suite;
 - 654 selected upstream PyTorch CPU tests;
 - 71 selected LAPACK-backed `torch.linalg` tests across real and complex,
   single- and double-precision dtypes;
+- a real Chromium WebGPU suite covering add, multiply, broadcast, strided
+  views, copies, and asynchronous readback with no validation errors or
+  implicit CPU fallbacks;
 - version, Emscripten platform, and single-thread invariants.
 
 The selected upstream gate permits no runtime skips, expected failures,
@@ -58,15 +61,17 @@ explicit exclusions.
 
 ## Deliberate build constraints
 
-The wheel is CPU-only and has no WebAssembly shared memory. Both ATen thread
-counts are fixed at one, and inter-op work runs inline.
+The WebAssembly CPU path has no shared memory. Both ATen thread counts are
+fixed at one, and inter-op work runs inline. The wheel also includes the
+narrow experimental browser WebGPU backend described in the project caveats.
 
 LAPACK uses Pyodide's `f2c` ABI: Fortran subroutines have an `i32` result rather
 than the native Fortran `void` result. Although callers ignore that result,
 WebAssembly includes it in the function type and rejects mismatched
 declarations at link time.
 
-Unsupported areas include accelerator backends, distributed training,
-multiprocessing, shared-memory tensors, `torch.compile`, runtime C++
-extensions, and multithreaded CPU execution. The full user-visible limitation
-list is maintained in [CAVEATS.md](../CAVEATS.md).
+Unsupported areas include accelerator backends other than the experimental
+WebGPU subset, distributed training, multiprocessing, shared-memory tensors,
+`torch.compile`, runtime C++ extensions, and multithreaded CPU execution. The
+full user-visible limitation list is maintained in
+[CAVEATS.md](../CAVEATS.md).
