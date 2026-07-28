@@ -18,7 +18,7 @@ See [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## CPU and threading
 
-The current wheel is CPU-only and deliberately threadless:
+The CPU execution path is deliberately threadless:
 
 - intra-op and inter-op thread counts are fixed at one;
 - attempts to set either count above one raise `RuntimeError`;
@@ -33,6 +33,36 @@ still freeze its own UI during PyTorch operations.
 
 The threadless build does not require the cross-origin isolation headers needed
 for shared WebAssembly memory.
+
+## Experimental WebGPU backend
+
+Development wheels built from `main` include an experimental `PrivateUse1`
+backend named `webgpu`. It submits real WGSL compute work through the browser
+WebGPU API, but it is not a general PyTorch accelerator backend.
+
+The tested surface is currently limited to one device, `torch.float32`,
+CPU-to-GPU and GPU-to-GPU copies, addition, multiplication, broadcasting, and
+explicit asynchronous readback. Unsupported operators raise errors; there is
+no implicit CPU fallback.
+
+Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. Stock
+single-threaded Pyodide cannot turn that Promise into a synchronous PyTorch
+copy, so `.cpu()`, `.item()`, and operations that need to inspect values on the
+host do not work for WebGPU tensors. Use
+`await torch.webgpu.to_cpu_async(tensor)`.
+
+The WebGPU backend:
+
+- requires a browser with WebGPU enabled and a secure context outside
+  localhost;
+- is separate from CUDA, so `torch.cuda.is_available()` remains false;
+- does not support autograd, modules, optimizers, reductions, matrix
+  multiplication, or model inference beyond the explicitly registered
+  operators;
+- uses 32-bit shape, stride, and storage-offset metadata and supports at most
+  eight dimensions;
+- has only been validated with the repository's deterministic SwiftShader
+  browser test so far.
 
 ## Performance and memory
 
@@ -68,7 +98,8 @@ only the raw Emscripten version is insufficient. See
 
 The current build intentionally omits:
 
-- CUDA, ROCm, MPS, XPU, and other accelerator backends;
+- CUDA, ROCm, MPS, XPU, and accelerator backends other than the narrow
+  experimental WebGPU implementation described above;
 - distributed training and RPC;
 - multiprocessing and filesystem-backed shared-memory tensors;
 - OpenMP, MKL, MKLDNN, FBGEMM, XNNPACK, QNNPACK, and NNPACK;

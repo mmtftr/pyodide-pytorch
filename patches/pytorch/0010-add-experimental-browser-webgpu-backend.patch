@@ -1,0 +1,953 @@
+From d7b77856dfbfce84d4ff6d01b7e823dfae72daaf Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Tue, 28 Jul 2026 18:26:19 +0200
+Subject: [PATCH 10/10] Add experimental browser WebGPU backend
+
+---
+ torch/CMakeLists.txt                 |   4 +
+ torch/__init__.py                    |   3 +
+ torch/csrc/webgpu/webgpu_backend.cpp | 675 +++++++++++++++++++++++++++
+ torch/webgpu/__init__.py             | 220 +++++++++
+ 4 files changed, 902 insertions(+)
+ create mode 100644 torch/csrc/webgpu/webgpu_backend.cpp
+ create mode 100644 torch/webgpu/__init__.py
+
+diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
+index 4587c64..2c040b4 100644
+--- a/torch/CMakeLists.txt
++++ b/torch/CMakeLists.txt
+@@ -39,6 +39,10 @@ set(TORCH_PYTHON_SRCS
+     ${GENERATED_CXX_PYTHON}
+     )
+ append_filelist("libtorch_python_core_sources" TORCH_PYTHON_SRCS)
++if(EMSCRIPTEN)
++  list(APPEND TORCH_PYTHON_SRCS
++    ${TORCH_SRC_DIR}/csrc/webgpu/webgpu_backend.cpp)
++endif()
+ 
+ # NB: This has to match the condition under which the JIT test directory
+ #     is included (at the time of writing that's in caffe2/CMakeLists.txt).
+diff --git a/torch/__init__.py b/torch/__init__.py
+index 10d44e6..addb63b 100644
+--- a/torch/__init__.py
++++ b/torch/__init__.py
+@@ -3081,6 +3081,9 @@ def _as_tensor_fullprec(t):
+ if _is_device_backend_autoload_enabled():
+     _import_device_backends()
+ 
++if sys.platform == "emscripten":
++    from torch import webgpu as webgpu
++
+ from torch import _logging
+ 
+ 
+diff --git a/torch/csrc/webgpu/webgpu_backend.cpp b/torch/csrc/webgpu/webgpu_backend.cpp
+new file mode 100644
+index 0000000..028b5e3
+--- /dev/null
++++ b/torch/csrc/webgpu/webgpu_backend.cpp
+@@ -0,0 +1,675 @@
++// Experimental browser WebGPU backend for the Pyodide build.
++//
++// The PrivateUse1 allocator/dispatch structure follows torch-webgpu
++// (https://github.com/jmaczan/torch-webgpu, MIT). The browser transport is an
++// Emscripten-specific EM_JS bridge because a Pyodide side module cannot import
++// Dawn's native wgpu API from the stock Pyodide main module.
++
++#include <ATen/ATen.h>
++#include <ATen/EmptyTensor.h>
++#include <ATen/TensorIterator.h>
++#include <c10/core/Allocator.h>
++#include <c10/core/Device.h>
++#include <c10/core/Stream.h>
++#include <c10/core/impl/DeviceGuardImplInterface.h>
++#include <emscripten.h>
++#include <torch/library.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <utility>
++#include <vector>
++
++namespace torch_webgpu::emscripten_backend {
++namespace {
++
++EM_JS(int, twgpu_is_ready, (), {
++  const state = globalThis.__torchWebGPU;
++  return state && state.device && state.queue && state.buffers ? 1 : 0;
++});
++
++EM_JS(std::uint32_t, twgpu_allocate, (std::uint32_t nbytes), {
++  const state = globalThis.__torchWebGPU;
++  if (!state || !state.device || !state.buffers) {
++    return 0;
++  }
++  const id = state.nextBufferId++;
++  const size = Math.max(4, nbytes >>> 0);
++  const buffer = state.device.createBuffer({
++    label: "PyTorch WebGPU tensor",
++    size,
++    usage: 0x0004 | 0x0008 | 0x0080,
++  });
++  state.buffers.set(id, buffer);
++  return id;
++});
++
++EM_JS(void, twgpu_release, (std::uint32_t id), {
++  const state = globalThis.__torchWebGPU;
++  if (!state || !state.buffers) {
++    return;
++  }
++  // Do not call GPUBuffer.destroy() here. Submitted command buffers may still
++  // retain this resource; dropping our registry reference lets WebGPU manage
++  // its safe lifetime.
++  state.buffers.delete(id);
++});
++
++EM_JS(
++    int,
++    twgpu_write_buffer,
++    (std::uint32_t id,
++     std::uint32_t destination_offset,
++     const void* source,
++     std::uint32_t nbytes),
++    {
++      const state = globalThis.__torchWebGPU;
++      const buffer = state && state.buffers && state.buffers.get(id);
++      if (!buffer) {
++        return 0;
++      }
++      state.queue.writeBuffer(
++          buffer,
++          destination_offset >>> 0,
++          HEAPU8,
++          source >>> 0,
++          nbytes >>> 0);
++      return 1;
++    });
++
++EM_JS(
++    int,
++    twgpu_copy_buffer,
++    (std::uint32_t source_id,
++     std::uint32_t source_offset,
++     std::uint32_t destination_id,
++     std::uint32_t destination_offset,
++     std::uint32_t nbytes),
++    {
++      const state = globalThis.__torchWebGPU;
++      const source = state && state.buffers && state.buffers.get(source_id);
++      const destination =
++          state && state.buffers && state.buffers.get(destination_id);
++      if (!source || !destination) {
++        return 0;
++      }
++      const encoder = state.device.createCommandEncoder({
++        label: "PyTorch WebGPU copy",
++      });
++      encoder.copyBufferToBuffer(
++          source,
++          source_offset >>> 0,
++          destination,
++          destination_offset >>> 0,
++          nbytes >>> 0);
++      state.queue.submit([encoder.finish()]);
++      state.copySubmissions++;
++      return 1;
++    });
++
++EM_JS(
++    int,
++    twgpu_binary,
++    (int operation,
++     std::uint32_t lhs_id,
++     std::uint32_t rhs_id,
++     std::uint32_t output_id,
++     const void* params,
++     std::uint32_t params_size,
++     std::uint32_t dispatch_x,
++     std::uint32_t dispatch_y),
++    {
++      const state = globalThis.__torchWebGPU;
++      const lhs = state && state.buffers && state.buffers.get(lhs_id);
++      const rhs = state && state.buffers && state.buffers.get(rhs_id);
++      const output = state && state.buffers && state.buffers.get(output_id);
++      if (!lhs || !rhs || !output) {
++        return 0;
++      }
++      const name = operation === 0 ? "add" : operation === 1 ? "mul" : "";
++      if (!name) {
++        return 0;
++      }
++      let pipeline = state.pipelines.get(name);
++      if (!pipeline) {
++        const expression =
++            operation === 0
++                ? "selfBuffer[idx_self] + params.alpha * otherBuffer[idx_other]"
++                : "selfBuffer[idx_self] * otherBuffer[idx_other]";
++        const code = `
++          const MAX_DIMS: u32 = 8u;
++          const WORKGROUP_SIZE: u32 = 64u;
++
++          struct Params {
++            length: u32,
++            ndim: u32,
++            alpha: f32,
++            dispatch_x: u32,
++
++            out_offset: u32,
++            self_offset: u32,
++            other_offset: u32,
++            _pad2: u32,
++
++            out_strides: array<u32, MAX_DIMS>,
++            self_strides: array<u32, MAX_DIMS>,
++            other_strides: array<u32, MAX_DIMS>,
++            shape: array<u32, MAX_DIMS>,
++          };
++
++          @group(0) @binding(0)
++          var<storage, read> selfBuffer: array<f32>;
++          @group(0) @binding(1)
++          var<storage, read> otherBuffer: array<f32>;
++          @group(0) @binding(2)
++          var<storage, read_write> outBuffer: array<f32>;
++          @group(0) @binding(3)
++          var<uniform> params: Params;
++
++          @compute @workgroup_size(64)
++          fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
++            let i = gid.x + gid.y * params.dispatch_x * WORKGROUP_SIZE;
++            if (i >= params.length) {
++              return;
++            }
++
++            var remaining = i;
++            var coord: array<u32, MAX_DIMS>;
++            for (var d: i32 = i32(params.ndim) - 1; d >= 0; d--) {
++              let ud = u32(d);
++              let size = params.shape[ud];
++              coord[ud] = remaining % size;
++              remaining = remaining / size;
++            }
++
++            var idx_out = params.out_offset;
++            var idx_self = params.self_offset;
++            var idx_other = params.other_offset;
++            for (var d: u32 = 0u; d < params.ndim; d++) {
++              let coordinate = coord[d];
++              idx_out += coordinate * params.out_strides[d];
++              idx_self += coordinate * params.self_strides[d];
++              idx_other += coordinate * params.other_strides[d];
++            }
++            outBuffer[idx_out] = ${expression};
++          }
++        `;
++        const module = state.device.createShaderModule({
++          label: `PyTorch WebGPU ${name}`,
++          code,
++        });
++        pipeline = state.device.createComputePipeline({
++          label: `PyTorch WebGPU ${name}`,
++          layout: "auto",
++          compute: {module, entryPoint: "main"},
++        });
++        state.pipelines.set(name, pipeline);
++      }
++      const paramsBuffer = state.device.createBuffer({
++        label: "PyTorch WebGPU binary parameters",
++        size: params_size >>> 0,
++        usage: 0x0040 | 0x0008,
++      });
++      state.queue.writeBuffer(
++          paramsBuffer, 0, HEAPU8, params >>> 0, params_size >>> 0);
++      const bindGroup = state.device.createBindGroup({
++        label: `PyTorch WebGPU ${name}`,
++        layout: pipeline.getBindGroupLayout(0),
++        entries: [
++          {binding: 0, resource: {buffer: lhs}},
++          {binding: 1, resource: {buffer: rhs}},
++          {binding: 2, resource: {buffer: output}},
++          {binding: 3, resource: {buffer: paramsBuffer}},
++        ],
++      });
++      const encoder = state.device.createCommandEncoder({
++        label: `PyTorch WebGPU ${name}`,
++      });
++      const pass = encoder.beginComputePass();
++      pass.setPipeline(pipeline);
++      pass.setBindGroup(0, bindGroup);
++      pass.dispatchWorkgroups(dispatch_x >>> 0, dispatch_y >>> 0);
++      pass.end();
++      state.queue.submit([encoder.finish()]);
++      state.kernelSubmissions++;
++      return 1;
++    });
++
++struct WebGPUAllocation {
++  std::uint32_t id;
++  std::size_t nbytes;
++};
++
++void delete_allocation(void* pointer) {
++  if (!pointer) {
++    return;
++  }
++  auto* allocation = static_cast<WebGPUAllocation*>(pointer);
++  twgpu_release(allocation->id);
++  delete allocation;
++}
++
++struct WebGPUAllocator final : c10::Allocator {
++  c10::DataPtr allocate(std::size_t nbytes) override {
++    if (nbytes == 0) {
++      return {
++          nullptr,
++          nullptr,
++          &delete_allocation,
++          c10::Device(c10::DeviceType::PrivateUse1, 0)};
++    }
++    TORCH_CHECK(
++        twgpu_is_ready(),
++        "WebGPU is not initialized; call `await torch.webgpu.init()` first");
++    TORCH_CHECK(
++        nbytes <= UINT32_MAX - std::size_t(3),
++        "WebGPU allocation is too large for the browser bridge: ",
++        nbytes,
++        " bytes");
++    const auto aligned_nbytes = (nbytes + 3) & ~std::size_t(3);
++    const auto id = twgpu_allocate(static_cast<std::uint32_t>(aligned_nbytes));
++    TORCH_CHECK(id != 0, "WebGPU buffer allocation failed");
++    auto* allocation = new WebGPUAllocation{id, aligned_nbytes};
++    return {
++        allocation,
++        allocation,
++        &delete_allocation,
++        c10::Device(c10::DeviceType::PrivateUse1, 0)};
++  }
++
++  c10::DeleterFnPtr raw_deleter() const override {
++    return &delete_allocation;
++  }
++
++  void copy_data(
++      void* destination,
++      const void* source,
++      std::size_t count) const override {
++    TORCH_CHECK_NOT_IMPLEMENTED(
++        false,
++        "WebGPU allocator copy_data is unavailable; use tensor copy operators");
++  }
++};
++
++WebGPUAllocator& allocator() {
++  static WebGPUAllocator instance;
++  return instance;
++}
++
++WebGPUAllocation& allocation(const at::Tensor& tensor) {
++  TORCH_CHECK(tensor.device().is_privateuseone(), "expected a WebGPU tensor");
++  auto* result =
++      static_cast<WebGPUAllocation*>(tensor.storage().data_ptr().get());
++  TORCH_CHECK(result, "WebGPU tensor has no GPUBuffer storage");
++  return *result;
++}
++
++std::uint32_t checked_nbytes(const at::Tensor& tensor) {
++  const auto bytes = tensor.numel() * tensor.element_size();
++  TORCH_CHECK(bytes >= 0 && bytes <= UINT32_MAX, "tensor is too large");
++  return static_cast<std::uint32_t>(bytes);
++}
++
++void check_supported_tensor(
++    const at::Tensor& tensor,
++    const char* operation,
++    bool require_contiguous = true) {
++  TORCH_CHECK(
++      tensor.device().is_privateuseone(),
++      operation,
++      " expected a WebGPU tensor");
++  TORCH_CHECK(
++      tensor.scalar_type() == at::kFloat,
++      operation,
++      " supports only torch.float32");
++  TORCH_CHECK(
++      !require_contiguous || tensor.is_contiguous(),
++      operation,
++      " requires contiguous tensors");
++  TORCH_CHECK(
++      tensor.storage_offset() >= 0,
++      operation,
++      " does not support negative storage offsets");
++}
++
++class WebGPUGuardImpl final : public c10::impl::DeviceGuardImplInterface {
++ public:
++  static constexpr c10::DeviceType static_type =
++      c10::DeviceType::PrivateUse1;
++
++  c10::DeviceType type() const override {
++    return static_type;
++  }
++
++  c10::Device exchangeDevice(c10::Device device) const override {
++    setDevice(device);
++    return c10::Device(static_type, 0);
++  }
++
++  c10::Device getDevice() const override {
++    return c10::Device(static_type, 0);
++  }
++
++  void setDevice(c10::Device device) const override {
++    TORCH_CHECK(
++        device.is_privateuseone() && device.index() <= 0,
++        "WebGPU supports only device 0");
++  }
++
++  void uncheckedSetDevice(c10::Device) const noexcept override {}
++
++  c10::DeviceIndex deviceCount() const noexcept override {
++    return twgpu_is_ready() ? 1 : 0;
++  }
++
++  c10::Stream getStream(c10::Device device) const noexcept override {
++    return c10::Stream(c10::Stream::DEFAULT, device);
++  }
++
++  c10::Stream exchangeStream(c10::Stream stream) const noexcept override {
++    return c10::Stream(c10::Stream::DEFAULT, stream.device());
++  }
++};
++
++at::Tensor empty_memory_format(
++    c10::IntArrayRef size,
++    std::optional<at::ScalarType> dtype,
++    std::optional<at::Layout> layout,
++    std::optional<at::Device> device,
++    std::optional<bool> pin_memory,
++    std::optional<c10::MemoryFormat> memory_format) {
++  const auto resolved_dtype = c10::dtype_or_default(dtype);
++  TORCH_CHECK(
++      resolved_dtype == at::kFloat, "WebGPU supports only torch.float32");
++  TORCH_CHECK(
++      c10::layout_or_default(layout) == c10::Layout::Strided,
++      "WebGPU supports only strided tensors");
++  TORCH_CHECK(
++      !c10::pinned_memory_or_default(pin_memory),
++      "WebGPU tensors cannot be pinned");
++  if (device) {
++    TORCH_CHECK(
++        device->is_privateuseone() && device->index() <= 0,
++        "WebGPU supports only device 0");
++  }
++  constexpr c10::DispatchKeySet key_set(c10::DispatchKey::PrivateUse1);
++  return at::detail::empty_generic(
++      size, &allocator(), key_set, resolved_dtype, memory_format);
++}
++
++at::Tensor empty_strided(
++    c10::IntArrayRef size,
++    c10::IntArrayRef stride,
++    std::optional<at::ScalarType> dtype,
++    std::optional<at::Layout> layout,
++    std::optional<at::Device> device,
++    std::optional<bool> pin_memory) {
++  const auto resolved_dtype = c10::dtype_or_default(dtype);
++  TORCH_CHECK(
++      resolved_dtype == at::kFloat, "WebGPU supports only torch.float32");
++  TORCH_CHECK(
++      c10::layout_or_default(layout) == c10::Layout::Strided,
++      "WebGPU supports only strided tensors");
++  TORCH_CHECK(
++      !c10::pinned_memory_or_default(pin_memory),
++      "WebGPU tensors cannot be pinned");
++  if (device) {
++    TORCH_CHECK(
++        device->is_privateuseone() && device->index() <= 0,
++        "WebGPU supports only device 0");
++  }
++  constexpr c10::DispatchKeySet key_set(c10::DispatchKey::PrivateUse1);
++  return at::detail::empty_strided_generic(
++      size, stride, &allocator(), key_set, resolved_dtype);
++}
++
++at::Tensor copy_from(
++    const at::Tensor& source,
++    const at::Tensor& destination,
++    bool /*non_blocking*/) {
++  TORCH_CHECK(source.defined(), "source tensor is not defined");
++  TORCH_CHECK(destination.defined(), "destination tensor is not defined");
++
++  if (source.device().is_cpu() &&
++      destination.device().is_privateuseone()) {
++    check_supported_tensor(destination, "CPU to WebGPU copy");
++    TORCH_CHECK(
++        source.scalar_type() == at::kFloat,
++        "CPU to WebGPU copy supports only torch.float32");
++    TORCH_CHECK(
++        source.sizes() == destination.sizes(), "copy shape mismatch");
++    const auto contiguous_source =
++        source.is_contiguous() ? source : source.contiguous();
++    const auto nbytes = checked_nbytes(contiguous_source);
++    if (nbytes == 0) {
++      return destination;
++    }
++    auto& destination_allocation = allocation(destination);
++    const auto destination_offset =
++        destination.storage_offset() * destination.element_size();
++    TORCH_CHECK(
++        destination_offset >= 0 &&
++            static_cast<std::size_t>(destination_offset) + nbytes <=
++                destination_allocation.nbytes,
++        "CPU to WebGPU copy exceeds destination storage");
++    TORCH_CHECK(
++        twgpu_write_buffer(
++            destination_allocation.id,
++            static_cast<std::uint32_t>(destination_offset),
++            contiguous_source.data_ptr(),
++            nbytes),
++        "CPU to WebGPU writeBuffer failed");
++    return destination;
++  }
++
++  if (source.device().is_privateuseone() &&
++      destination.device().is_privateuseone()) {
++    check_supported_tensor(source, "WebGPU copy");
++    check_supported_tensor(destination, "WebGPU copy");
++    TORCH_CHECK(
++        source.sizes() == destination.sizes(), "copy shape mismatch");
++    const auto nbytes = checked_nbytes(source);
++    if (nbytes == 0) {
++      return destination;
++    }
++    auto& source_allocation = allocation(source);
++    auto& destination_allocation = allocation(destination);
++    const auto source_offset = source.storage_offset() * source.element_size();
++    const auto destination_offset =
++        destination.storage_offset() * destination.element_size();
++    TORCH_CHECK(
++        twgpu_copy_buffer(
++            source_allocation.id,
++            static_cast<std::uint32_t>(source_offset),
++            destination_allocation.id,
++            static_cast<std::uint32_t>(destination_offset),
++            nbytes),
++        "WebGPU buffer copy failed");
++    return destination;
++  }
++
++  if (source.device().is_privateuseone() && destination.device().is_cpu()) {
++    TORCH_CHECK(
++        false,
++        "browser WebGPU readback is asynchronous; use "
++        "`await torch.webgpu.to_cpu_async(tensor)` instead of `.cpu()`");
++  }
++
++  TORCH_CHECK(
++      false,
++      "unsupported WebGPU copy: ",
++      source.device(),
++      " -> ",
++      destination.device());
++}
++
++struct BinaryParams {
++  std::uint32_t length;
++  std::uint32_t ndim;
++  float alpha;
++  std::uint32_t dispatch_x;
++
++  std::uint32_t output_offset;
++  std::uint32_t lhs_offset;
++  std::uint32_t rhs_offset;
++  std::uint32_t padding;
++
++  std::uint32_t output_strides[8];
++  std::uint32_t lhs_strides[8];
++  std::uint32_t rhs_strides[8];
++  std::uint32_t shape[8];
++};
++
++static_assert(sizeof(BinaryParams) == 160);
++
++std::uint32_t checked_u32(std::int64_t value, const char* description) {
++  TORCH_CHECK(
++      value >= 0 &&
++          static_cast<std::uint64_t>(value) <=
++              std::numeric_limits<std::uint32_t>::max(),
++      description,
++      " does not fit in the WebGPU backend's uint32 metadata");
++  return static_cast<std::uint32_t>(value);
++}
++
++at::Tensor binary(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    int operation,
++    float alpha = 1.0f) {
++  check_supported_tensor(lhs, "WebGPU binary operation", false);
++  check_supported_tensor(rhs, "WebGPU binary operation", false);
++  const auto output_shape = at::infer_size(lhs.sizes(), rhs.sizes());
++  auto output = at::empty(output_shape, lhs.options());
++  if (output.numel() == 0) {
++    return output;
++  }
++
++  at::TensorIteratorConfig config;
++  config.set_check_mem_overlap(true);
++  config.add_output(output);
++  config.add_input(lhs);
++  config.add_input(rhs);
++  config.check_all_same_dtype(true);
++  config.check_all_same_device(true);
++  auto iterator = config.build();
++
++  TORCH_CHECK(
++      iterator.ntensors() == 3 &&
++          iterator.common_dtype() == at::ScalarType::Float &&
++          iterator.device_type() == c10::DeviceType::PrivateUse1,
++      "invalid TensorIterator for WebGPU binary operation");
++  const auto ndim = iterator.ndim();
++  TORCH_CHECK(ndim >= 0 && ndim <= 8, "WebGPU supports at most 8 dimensions");
++
++  const auto element_size = iterator.element_size(0);
++  TORCH_CHECK(element_size == sizeof(float));
++  const auto output_strides_bytes = iterator.strides(0);
++  const auto lhs_strides_bytes = iterator.strides(1);
++  const auto rhs_strides_bytes = iterator.strides(2);
++  const auto shape = iterator.shape();
++
++  const auto numel = checked_u32(iterator.numel(), "tensor element count");
++  const auto num_workgroups =
++      (numel + std::uint32_t(63)) / std::uint32_t(64);
++  const auto dispatch_x = std::min(num_workgroups, std::uint32_t(65535));
++  const auto dispatch_y =
++      (num_workgroups + std::uint32_t(65534)) / std::uint32_t(65535);
++
++  BinaryParams params{};
++  params.length = numel;
++  params.ndim = static_cast<std::uint32_t>(ndim);
++  params.alpha = alpha;
++  params.dispatch_x = dispatch_x;
++  params.output_offset =
++      checked_u32(output.storage_offset(), "output storage offset");
++  params.lhs_offset = checked_u32(lhs.storage_offset(), "lhs storage offset");
++  params.rhs_offset = checked_u32(rhs.storage_offset(), "rhs storage offset");
++  for (std::size_t dimension = 0; dimension < 8; ++dimension) {
++    params.shape[dimension] = 1;
++  }
++  for (std::int64_t dimension = 0; dimension < ndim; ++dimension) {
++    TORCH_CHECK(
++        output_strides_bytes[dimension] % element_size == 0 &&
++            lhs_strides_bytes[dimension] % element_size == 0 &&
++            rhs_strides_bytes[dimension] % element_size == 0,
++        "WebGPU tensor stride is not a multiple of element size");
++    params.output_strides[dimension] = checked_u32(
++        output_strides_bytes[dimension] / element_size, "output stride");
++    params.lhs_strides[dimension] = checked_u32(
++        lhs_strides_bytes[dimension] / element_size, "lhs stride");
++    params.rhs_strides[dimension] = checked_u32(
++        rhs_strides_bytes[dimension] / element_size, "rhs stride");
++    params.shape[dimension] = checked_u32(shape[dimension], "shape dimension");
++  }
++
++  auto& lhs_allocation = allocation(lhs);
++  auto& rhs_allocation = allocation(rhs);
++  auto& output_allocation = allocation(output);
++  TORCH_CHECK(
++      twgpu_binary(
++          operation,
++          lhs_allocation.id,
++          rhs_allocation.id,
++          output_allocation.id,
++          &params,
++          sizeof(params),
++          dispatch_x,
++          dispatch_y),
++      "WebGPU binary dispatch failed");
++  return output;
++}
++
++at::Tensor add(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha) {
++  return binary(lhs, rhs, 0, alpha.to<float>());
++}
++
++at::Tensor multiply(const at::Tensor& lhs, const at::Tensor& rhs) {
++  return binary(lhs, rhs, 1);
++}
++
++std::int64_t buffer_id(const at::Tensor& tensor) {
++  if (tensor.numel() == 0) {
++    return 0;
++  }
++  return allocation(tensor).id;
++}
++
++std::int64_t buffer_nbytes(const at::Tensor& tensor) {
++  return checked_nbytes(tensor);
++}
++
++} // namespace
++
++C10_REGISTER_GUARD_IMPL(PrivateUse1, WebGPUGuardImpl);
++
++TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
++  module.impl("empty.memory_format", TORCH_FN(empty_memory_format));
++  module.impl("empty_strided", TORCH_FN(empty_strided));
++  module.impl("_copy_from", TORCH_FN(copy_from));
++  module.impl("add.Tensor", TORCH_FN(add));
++  module.impl("mul.Tensor", TORCH_FN(multiply));
++}
++
++TORCH_LIBRARY(webgpu, module) {
++  module.def("buffer_id(Tensor tensor) -> int");
++  module.def("buffer_nbytes(Tensor tensor) -> int");
++}
++
++TORCH_LIBRARY_IMPL(webgpu, PrivateUse1, module) {
++  module.impl("buffer_id", TORCH_FN(buffer_id));
++  module.impl("buffer_nbytes", TORCH_FN(buffer_nbytes));
++}
++
++TORCH_LIBRARY_IMPL(_, AutogradPrivateUse1, module) {
++  module.fallback(torch::CppFunction::makeFallthrough());
++}
++
++} // namespace torch_webgpu::emscripten_backend
+diff --git a/torch/webgpu/__init__.py b/torch/webgpu/__init__.py
+new file mode 100644
+index 0000000..b5421ac
+--- /dev/null
++++ b/torch/webgpu/__init__.py
+@@ -0,0 +1,220 @@
++"""Experimental browser WebGPU backend for the Pyodide PyTorch build.
++
++GPU storage and ATen dispatch are implemented in C++ using PyTorch's
++``PrivateUse1`` extension points. Browser WebGPU commands are issued through
++an Emscripten JavaScript bridge embedded in ``torch._C``. GPU work is enqueued
++synchronously, while readback is explicitly asynchronous because WebGPU does
++not expose synchronous buffer mapping.
++"""
++
++from __future__ import annotations
++
++import sys
++from typing import Any
++
++import torch
++
++_adapter: Any | None = None
++_device: Any | None = None
++
++
++def _js() -> Any:
++    try:
++        import js
++    except ImportError as exc:  # pragma: no cover - browser-only module
++        raise RuntimeError("the WebGPU backend requires Pyodide") from exc
++    return js
++
++
++def _js_object(**values: Any) -> Any:
++    result = _js().Object.new()
++    for key, value in values.items():
++        setattr(result, key, value)
++    return result
++
++
++def _js_array(*values: Any) -> Any:
++    result = _js().Array.new()
++    for value in values:
++        result.push(value)
++    return result
++
++
++def _state() -> Any:
++    state = getattr(_js().globalThis, "__torchWebGPU", None)
++    if state is None:
++        raise RuntimeError(
++            "WebGPU is not initialized; call `await torch_webgpu.init()` first"
++        )
++    return state
++
++
++async def init(*, device: Any | None = None) -> None:
++    """Initialize the browser GPUDevice used by the compiled backend."""
++
++    global _adapter, _device
++
++    if is_initialized():
++        return
++    if device is None:
++        gpu = getattr(_js().navigator, "gpu", None)
++        if gpu is None:
++            raise RuntimeError("WebGPU is not exposed by this browser/runtime")
++        _adapter = await gpu.requestAdapter(
++            _js_object(powerPreference="high-performance")
++        )
++        if _adapter is None:
++            raise RuntimeError("the browser did not provide a WebGPU adapter")
++        device = await _adapter.requestDevice()
++
++    state = _js_object(
++        device=device,
++        queue=device.queue,
++        buffers=_js().Map.new(),
++        pipelines=_js().Map.new(),
++        nextBufferId=1,
++        kernelSubmissions=0,
++        copySubmissions=0,
++    )
++    setattr(_js().globalThis, "__torchWebGPU", state)
++    _device = device
++
++
++async def synchronize() -> None:
++    """Wait for all commands submitted before this call."""
++
++    await _state().queue.onSubmittedWorkDone()
++
++
++async def to_cpu_async(tensor: torch.Tensor) -> torch.Tensor:
++    """Read a contiguous float32 WebGPU tensor into CPU memory."""
++
++    import numpy as np
++
++    if tensor.device.type != "webgpu":
++        raise TypeError(f"expected a WebGPU tensor, got {tensor.device}")
++    if tensor.dtype is not torch.float32:
++        raise NotImplementedError("WebGPU readback supports only torch.float32")
++    if not tensor.is_contiguous():
++        raise NotImplementedError("WebGPU readback requires a contiguous tensor")
++    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
++    if nbytes == 0:
++        return torch.empty(tuple(tensor.shape), dtype=tensor.dtype)
++
++    state = _state()
++    identifier = int(torch.ops.webgpu.buffer_id(tensor))
++    source = state.buffers.get(identifier)
++    if source is None:
++        raise RuntimeError("WebGPU tensor refers to a released GPUBuffer")
++
++    allocated_nbytes = max(4, nbytes)
++    readback = state.device.createBuffer(
++        _js_object(
++            label="PyTorch WebGPU readback",
++            size=allocated_nbytes,
++            usage=0x0001 | 0x0008,
++        )
++    )
++    encoder = state.device.createCommandEncoder(
++        _js_object(label="PyTorch WebGPU readback")
++    )
++    source_offset = int(tensor.storage_offset()) * tensor.element_size()
++    encoder.copyBufferToBuffer(
++        source, source_offset, readback, 0, allocated_nbytes
++    )
++    state.queue.submit(_js_array(encoder.finish()))
++    await readback.mapAsync(_js().GPUMapMode.READ)
++    try:
++        mapped = readback.getMappedRange(0, allocated_nbytes)
++        byte_view = _js().Uint8Array.new(mapped)
++        array = np.frombuffer(
++            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
++        ).copy()
++    finally:
++        readback.unmap()
++        readback.destroy()
++    return torch.from_numpy(array).reshape(tuple(tensor.shape))
++
++
++def is_initialized() -> bool:
++    try:
++        state = getattr(_js().globalThis, "__torchWebGPU", None)
++        return (
++            state is not None
++            and getattr(state, "device", None) is not None
++            and getattr(state, "queue", None) is not None
++        )
++    except RuntimeError:
++        return False
++
++
++def is_available() -> bool:
++    if is_initialized():
++        return True
++    try:
++        return getattr(_js().navigator, "gpu", None) is not None
++    except RuntimeError:
++        return False
++
++
++def current_device() -> int:
++    return 0
++
++
++def device_count() -> int:
++    return 1 if is_available() else 0
++
++
++def get_amp_supported_dtype() -> list[torch.dtype]:
++    return [torch.float32]
++
++
++def _is_in_bad_fork() -> bool:
++    return False
++
++
++def manual_seed_all(seed: int) -> None:
++    del seed
++
++
++def kernel_submissions() -> int:
++    return int(_state().kernelSubmissions)
++
++
++def copy_submissions() -> int:
++    return int(_state().copySubmissions)
++
++
++def cpu_fallbacks() -> int:
++    """Return the number of implicit CPU fallbacks.
++
++    This initial backend does not register any CPU fallback path; unsupported
++    operations fail instead of silently moving tensor data off the GPU.
++    """
++
++    return 0
++
++
++torch.utils.rename_privateuse1_backend("webgpu")
++torch._register_device_module("webgpu", sys.modules[__name__])
++torch.utils.generate_methods_for_privateuse1_backend(
++    for_tensor=True,
++    for_module=True,
++    for_storage=True,
++    for_packed_sequence=True,
++)
++
++
++__all__ = [
++    "copy_submissions",
++    "cpu_fallbacks",
++    "current_device",
++    "device_count",
++    "get_amp_supported_dtype",
++    "init",
++    "is_available",
++    "is_initialized",
++    "kernel_submissions",
++    "synchronize",
++    "to_cpu_async",
++]
+-- 
+2.51.1
+

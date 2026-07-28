@@ -7,9 +7,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Run PyTorch in a browser or another Pyodide environment. This repository
-produces a reproducible, CPU-only WebAssembly wheel, tests it inside the exact
-Pyodide runtime it targets, and publishes the wheel with checksums and build
-provenance.
+produces a reproducible WebAssembly wheel, tests it inside the exact Pyodide
+runtime it targets, and publishes the wheel with checksums and build
+provenance. The main branch also contains an early browser WebGPU backend;
+the current `r2` release remains CPU-only.
 
 **[Try the browser playground](https://mmtftr.github.io/pyodide-pytorch/)**
 · [Download the latest release](https://github.com/mmtftr/pyodide-pytorch/releases/latest)
@@ -103,6 +104,45 @@ production deployment, pin an immutable
 [release](https://github.com/mmtftr/pyodide-pytorch/releases), host the wheel
 on a CORS-enabled origin, and verify its published SHA-256 digest.
 
+## Experimental WebGPU backend
+
+Development wheels built from `main` expose a real PyTorch `webgpu` device in
+browsers that implement WebGPU:
+
+```python
+import torch
+
+await torch.webgpu.init()
+
+x = torch.tensor([[1.0], [2.0]]).to("webgpu")
+y = torch.tensor([[10.0, 20.0, 30.0]]).to("webgpu")
+result = torch.add(x, y, alpha=2)
+
+print(result.device)  # webgpu:0
+print(await torch.webgpu.to_cpu_async(result))
+```
+
+The initial backend is intentionally narrow:
+
+- one browser `GPUDevice`, contiguous `torch.float32` storage, and at most
+  eight dimensions;
+- GPU-native tensor addition and multiplication, including broadcasting,
+  storage offsets, and `alpha` for addition;
+- CPU-to-GPU and GPU-to-GPU copies;
+- explicit asynchronous GPU-to-CPU readback through
+  `await torch.webgpu.to_cpu_async(tensor)`;
+- unsupported operations fail instead of silently falling back to the CPU.
+
+Synchronous `.cpu()`, `.item()`, and value-based tensor formatting cannot wait
+for WebGPU buffer mapping in stock single-threaded Pyodide, so they are not
+implemented. This is a `PrivateUse1` backend named `webgpu`; it does not claim
+CUDA compatibility and `torch.cuda.is_available()` remains false.
+
+The backend follows the allocator, device-guard, and WGSL dispatch structure
+of [torch-webgpu](https://github.com/jmaczan/torch-webgpu), replacing its
+native Dawn transport with an Emscripten JavaScript bridge embedded in
+`torch._C`.
+
 ## What works
 
 | Area | Current status |
@@ -111,7 +151,8 @@ on a CORS-enabled origin, and verify its published SHA-256 digest.
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| CUDA, ROCm, MPS, XPU, or WebGPU | Not available |
+| Experimental WebGPU (`main` development wheel) | `float32` add/multiply, broadcasting, copies, and async readback |
+| CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |
 
@@ -155,8 +196,8 @@ and every probed test not admitted to CI are documented in
 - Build and publish a tested PyTorch × Pyodide compatibility matrix.
 - Expand the pinned upstream CPU/WebAssembly test suite, especially autograd
   and `torch.nn`.
-- Investigate WebGPU support. This requires substantial PyTorch backend and
-  browser integration work and is not currently promised.
+- Expand the experimental WebGPU operator and dtype coverage while preserving
+  explicit unsupported-operation errors and zero implicit CPU fallback.
 
 ## License
 

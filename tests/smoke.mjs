@@ -90,6 +90,12 @@ assert sys.platform == "emscripten", sys.platform
 assert torch.__version__ == EXPECTED_TORCH_VERSION, torch.__version__
 assert torch.version.git_version == EXPECTED_TORCH_COMMIT, torch.version.git_version
 assert not torch.cuda.is_available()
+assert hasattr(torch, "webgpu")
+assert not torch.webgpu.is_initialized()
+assert not torch.webgpu.is_available()
+assert torch.device("webgpu").type == "webgpu"
+assert hasattr(torch.ops.webgpu, "buffer_id")
+assert torch.webgpu.cpu_fallbacks() == 0
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)

@@ -304,7 +304,9 @@ jobs:
 
       - name: Test inside pinned Pyodide
         run: |
-          npm install --no-save "pyodide@$PYODIDE_VERSION"
+          npm install --no-save \
+            "puppeteer-core@25.4.0" \
+            "pyodide@$PYODIDE_VERSION"
           node tests/smoke.mjs \
             "${{ steps.wheel.outputs.path }}" \
             "$PYTORCH_VERSION" \
@@ -314,6 +316,38 @@ jobs:
             pytorch \
             "$PYTORCH_VERSION" \
             "$PYTORCH_REF"
+          mkdir -p wheelhouse/browser-deps
+          python -m pip download \
+            --dest wheelhouse/browser-deps \
+            --no-deps \
+            --only-binary=:all: \
+            "filelock==3.32.0"
+          mapfile -t filelock_wheels < <(
+            find wheelhouse/browser-deps \
+              -maxdepth 1 \
+              -type f \
+              -name 'filelock-*.whl' \
+              -print
+          )
+          test "${#filelock_wheels[@]}" -eq 1
+          mapfile -t pyodide_modules < <(
+            find .pyodide-xbuildenv \
+              -type f \
+              -path '*/pyodide-root/dist/pyodide.mjs' \
+              -print
+          )
+          test "${#pyodide_modules[@]}" -ge 1
+          pyodide_module="${pyodide_modules[0]}"
+          for candidate in "${pyodide_modules[@]}"; do
+            if (( ${#candidate} < ${#pyodide_module} )); then
+              pyodide_module="$candidate"
+            fi
+          done
+          pyodide_dist="$(dirname "$pyodide_module")"
+          node tests/webgpu.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "${filelock_wheels[0]}" \
+            "$pyodide_dist"
 
       - name: Upload unverified wheel after validation or smoke failure
         if: ${{ failure() && steps.wheel.outcome != 'skipped' }}

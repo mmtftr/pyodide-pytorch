@@ -1,0 +1,114 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU browser test</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  window.webgpuTest = { done: false, ok: false, message: "starting" };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    if (!wheel || !filelockWheel) {
+      throw new Error("wheel query parameters are missing");
+    }
+    if (!navigator.gpu) {
+      throw new Error("navigator.gpu is unavailable");
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null) {
+      throw new Error("requestAdapter returned null");
+    }
+    window.webgpuTest.adapter = {
+      architecture: adapter.info?.architecture ?? "",
+      description: adapter.info?.description ?? "",
+      device: adapter.info?.device ?? "",
+      vendor: adapter.info?.vendor ?? "",
+    };
+    report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import torch
+import torch.webgpu
+
+assert torch.webgpu.is_available()
+await torch.webgpu.init()
+
+x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32).to("webgpu")
+y = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32).to("webgpu")
+added = x + y
+multiplied = x * y
+broadcast = torch.add(
+    torch.tensor([[1.0], [2.0]]).to("webgpu"),
+    torch.tensor([[10.0, 20.0, 30.0]]).to("webgpu"),
+    alpha=2,
+)
+added_cpu = await torch.webgpu.to_cpu_async(added)
+multiplied_cpu = await torch.webgpu.to_cpu_async(multiplied)
+broadcast_cpu = await torch.webgpu.to_cpu_async(broadcast)
+
+assert isinstance(added, torch.Tensor)
+assert added.device.type == "webgpu"
+torch.testing.assert_close(added_cpu, torch.tensor([5.0, 7.0, 9.0]))
+torch.testing.assert_close(
+    multiplied_cpu,
+    torch.tensor([4.0, 10.0, 18.0]),
+)
+torch.testing.assert_close(
+    broadcast_cpu,
+    torch.tensor([[21.0, 41.0, 61.0], [22.0, 42.0, 62.0]]),
+)
+assert torch.webgpu.kernel_submissions() == 3
+assert torch.webgpu.cpu_fallbacks() == 0
+
+try:
+    added.cpu()
+except RuntimeError as error:
+    assert "asynchronous" in str(error)
+else:
+    raise AssertionError("synchronous WebGPU readback unexpectedly succeeded")
+
+{
+    "added": added_cpu.tolist(),
+    "multiplied": multiplied_cpu.tolist(),
+    "broadcast": broadcast_cpu.tolist(),
+    "kernel_submissions": torch.webgpu.kernel_submissions(),
+    "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
+}
+    `);
+    window.webgpuTest.result = result.toJs({
+      dict_converter: Object.fromEntries,
+    });
+    result.destroy();
+    window.webgpuTest.ok = true;
+    window.webgpuTest.message = "browser WebGPU dispatch test passed";
+    report(window.webgpuTest.message);
+  } catch (error) {
+    window.webgpuTest.message = error?.stack ?? String(error);
+    console.error(error);
+    report(window.webgpuTest.message);
+  } finally {
+    window.webgpuTest.done = true;
+  }
+</script>
