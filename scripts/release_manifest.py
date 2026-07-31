@@ -23,6 +23,16 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def tree_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    for member in sorted(item for item in path.rglob("*") if item.is_file()):
+        relative = member.relative_to(path).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "little"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(sha256(member)))
+    return digest.hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("wheel", type=Path)
@@ -41,6 +51,13 @@ def main() -> int:
         },
         "inputs": {
             "build_script_sha256": sha256(ROOT / "scripts" / "build_wheel.sh"),
+            "staging_script_sha256": sha256(
+                ROOT / "scripts" / "stage_webgpu_sources.py"
+            ),
+            "vendor_trees": {
+                name: tree_sha256(ROOT / "vendor" / name)
+                for name in ("emdawnwebgpu", "torch-webgpu")
+            },
             "patches": [
                 {"filename": patch.name, "sha256": sha256(patch)}
                 for patch in patches

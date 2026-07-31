@@ -137,6 +137,12 @@ but it assumes that the host compiler, Emscripten, Pyodide cross-build
 environment, native `protoc`, patched PyTorch checkout, and LAPACK side module
 have already been prepared.
 
+Before CMake configuration, the build script runs
+[`scripts/stage_webgpu_sources.py`](../scripts/stage_webgpu_sources.py). It
+copies the checked-in, pinned torch-webgpu and Emdawnwebgpu snapshots into the
+PyTorch `third_party` directory. This step performs no network access. Vendor
+tree hashes and the staging-script hash are included in the release manifest.
+
 ## Build cache
 
 GitHub Actions uses separate caches for:
@@ -202,6 +208,8 @@ pin must be updated and tested as one ABI tuple.
 | `config/build.toml` | Build, ABI, toolchain, and release pins |
 | `config/build-constraints.txt` | Python build-dependency constraints |
 | `patches/pytorch/` | Ordered patches applied to the pinned PyTorch source |
+| `vendor/` | Pinned torch-webgpu and Emdawnwebgpu source snapshots |
+| `scripts/stage_webgpu_sources.py` | Deterministic, network-free vendor staging |
 | `scripts/build_wheel.sh` | PyTorch and `pyodide-build` entry point |
 | `scripts/fetch_lapack.py` | Pinned Pyodide LAPACK download and verification |
 | `scripts/postprocess_wheel.py` | Deterministic pruning and repacking |

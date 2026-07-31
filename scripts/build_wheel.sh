@@ -33,6 +33,8 @@ actual_ref="$(git -C "$source_dir" rev-parse HEAD)"
   exit 1
 }
 
+python3 "$repo_root/scripts/stage_webgpu_sources.py" "$source_dir"
+
 actual_emscripten="$(pyodide config get emscripten_version)"
 [[ "$actual_emscripten" == "$EMSCRIPTEN_VERSION" ]] || {
   echo "pyodide-build expects Emscripten $actual_emscripten, manifest pins $EMSCRIPTEN_VERSION" >&2

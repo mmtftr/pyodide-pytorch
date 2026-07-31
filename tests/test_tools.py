@@ -17,6 +17,7 @@ import config  # noqa: E402
 import fetch_lapack  # noqa: E402
 import postprocess_wheel  # noqa: E402
 import run_upstream_tests  # noqa: E402
+import stage_webgpu_sources  # noqa: E402
 import verify_release_artifact  # noqa: E402
 import validate_wheel  # noqa: E402
 
@@ -109,6 +110,85 @@ class ToolTests(unittest.TestCase):
         manifest = config.load()
         manifest["pyodide"]["build_version"] = "9.8.7"
         self.assertEqual(config.validate(manifest), [])
+
+    def test_webgpu_sources_are_exactly_pinned_and_vendored(self) -> None:
+        manifest = config.load()
+        values = config.flat_env(manifest)
+        self.assertEqual(
+            values["TORCH_WEBGPU_REF"],
+            "a4369ff0f61f4e58cbffb048cee85047b33dacba",
+        )
+        self.assertEqual(values["EMDAWNWEBGPU_RELEASE"], "v20251002.162335")
+        self.assertRegex(values["EMDAWNWEBGPU_ARCHIVE_SHA512"], r"^[0-9a-f]{128}$")
+        self.assertEqual(
+            (ROOT / "vendor" / "torch-webgpu" / "COMMIT")
+            .read_text(encoding="utf-8")
+            .strip(),
+            values["TORCH_WEBGPU_REF"],
+        )
+        version = (ROOT / "vendor" / "emdawnwebgpu" / "VERSION.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(values["EMDAWNWEBGPU_RELEASE"], version)
+        self.assertIn(values["EMDAWNWEBGPU_DAWN_REF"], version)
+        for path in (
+            ROOT / "vendor" / "torch-webgpu" / "LICENSE",
+            ROOT / "vendor" / "emdawnwebgpu" / "webgpu" / "src" / "LICENSE",
+            ROOT / "vendor" / "emdawnwebgpu" / "webgpu_cpp" / "LICENSE",
+        ):
+            self.assertTrue(path.is_file(), path)
+
+    def test_webgpu_source_staging_is_network_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            pytorch = Path(temporary)
+            (pytorch / "torch").mkdir()
+            (pytorch / "torch" / "CMakeLists.txt").write_text(
+                "# fixture\n", encoding="utf-8"
+            )
+            original = sys.argv
+            try:
+                sys.argv = ["stage_webgpu_sources.py", str(pytorch)]
+                self.assertEqual(stage_webgpu_sources.main(), 0)
+            finally:
+                sys.argv = original
+            self.assertTrue(
+                (
+                    pytorch
+                    / "third_party"
+                    / "torch-webgpu"
+                    / "csrc"
+                    / "ops"
+                    / "binary.cpp"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    pytorch
+                    / "third_party"
+                    / "emdawnwebgpu"
+                    / "webgpu_cpp"
+                    / "include"
+                    / "webgpu"
+                    / "webgpu_cpp.h"
+                ).is_file()
+            )
+
+    def test_webgpu_build_keeps_side_module_em_js_exports(self) -> None:
+        build_script = (ROOT / "scripts" / "build_wheel.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--exports=whole_archive", build_script)
+        patch = (
+            ROOT
+            / "patches"
+            / "pytorch"
+            / "0010-add-experimental-browser-webgpu-backend.patch"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"webgpu/licenses/*.txt"', patch)
+        architecture = (
+            ROOT / "docs" / "webgpu-browser-architecture.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SIDE_MODULE=1", architecture)
 
     def test_upstream_manifest_is_pinned_and_auditable(self) -> None:
         manifest = json.loads(

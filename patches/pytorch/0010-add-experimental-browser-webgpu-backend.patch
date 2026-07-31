@@ -1,242 +1,79 @@
-From 231eee8d2a3e46c8fab14c8816e3eab6e6826ea0 Mon Sep 17 00:00:00 2001
+From c992af7a797d31f67c6ed52b03764da84ccd7a11 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
-Date: Tue, 28 Jul 2026 18:59:51 +0200
-Subject: [PATCH 10/10] Add experimental browser WebGPU backend
+Date: Fri, 31 Jul 2026 16:26:13 +0400
+Subject: [PATCH 10/10] Add browser torch-webgpu eager kernel profile
 
 ---
- third_party/torch-webgpu/LICENSE     | 201 ++++++++
- torch/CMakeLists.txt                 |   4 +
- torch/__init__.py                    |   3 +
- torch/csrc/webgpu/webgpu_backend.cpp | 727 +++++++++++++++++++++++++++
- torch/webgpu/__init__.py             | 222 ++++++++
- 5 files changed, 1157 insertions(+)
- create mode 100644 third_party/torch-webgpu/LICENSE
+ setup.py                                      |   1 +
+ torch/CMakeLists.txt                          |  21 +
+ torch/__init__.py                             |   3 +
+ torch/csrc/webgpu/browser_ops.cpp             | 541 ++++++++++++++
+ .../webgpu/compat/core/webgpu_allocator.h     |  21 +
+ .../csrc/webgpu/compat/core/webgpu_context.h  |  21 +
+ torch/csrc/webgpu/emdawnwebgpu_bridge.cpp     | 684 ++++++++++++++++++
+ torch/csrc/webgpu/webgpu_backend.cpp          | 380 ++++++++++
+ torch/csrc/webgpu/webgpu_context.cpp          |  44 ++
+ torch/webgpu/__init__.py                      | 292 ++++++++
+ 10 files changed, 2008 insertions(+)
+ create mode 100644 torch/csrc/webgpu/browser_ops.cpp
+ create mode 100644 torch/csrc/webgpu/compat/core/webgpu_allocator.h
+ create mode 100644 torch/csrc/webgpu/compat/core/webgpu_context.h
+ create mode 100644 torch/csrc/webgpu/emdawnwebgpu_bridge.cpp
  create mode 100644 torch/csrc/webgpu/webgpu_backend.cpp
+ create mode 100644 torch/csrc/webgpu/webgpu_context.cpp
  create mode 100644 torch/webgpu/__init__.py
 
-diff --git a/third_party/torch-webgpu/LICENSE b/third_party/torch-webgpu/LICENSE
-new file mode 100644
-index 0000000..f49a4e1
---- /dev/null
-+++ b/third_party/torch-webgpu/LICENSE
-@@ -0,0 +1,201 @@
-+                                 Apache License
-+                           Version 2.0, January 2004
-+                        http://www.apache.org/licenses/
-+
-+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-+
-+   1. Definitions.
-+
-+      "License" shall mean the terms and conditions for use, reproduction,
-+      and distribution as defined by Sections 1 through 9 of this document.
-+
-+      "Licensor" shall mean the copyright owner or entity authorized by
-+      the copyright owner that is granting the License.
-+
-+      "Legal Entity" shall mean the union of the acting entity and all
-+      other entities that control, are controlled by, or are under common
-+      control with that entity. For the purposes of this definition,
-+      "control" means (i) the power, direct or indirect, to cause the
-+      direction or management of such entity, whether by contract or
-+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-+      outstanding shares, or (iii) beneficial ownership of such entity.
-+
-+      "You" (or "Your") shall mean an individual or Legal Entity
-+      exercising permissions granted by this License.
-+
-+      "Source" form shall mean the preferred form for making modifications,
-+      including but not limited to software source code, documentation
-+      source, and configuration files.
-+
-+      "Object" form shall mean any form resulting from mechanical
-+      transformation or translation of a Source form, including but
-+      not limited to compiled object code, generated documentation,
-+      and conversions to other media types.
-+
-+      "Work" shall mean the work of authorship, whether in Source or
-+      Object form, made available under the License, as indicated by a
-+      copyright notice that is included in or attached to the work
-+      (an example is provided in the Appendix below).
-+
-+      "Derivative Works" shall mean any work, whether in Source or Object
-+      form, that is based on (or derived from) the Work and for which the
-+      editorial revisions, annotations, elaborations, or other modifications
-+      represent, as a whole, an original work of authorship. For the purposes
-+      of this License, Derivative Works shall not include works that remain
-+      separable from, or merely link (or bind by name) to the interfaces of,
-+      the Work and Derivative Works thereof.
-+
-+      "Contribution" shall mean any work of authorship, including
-+      the original version of the Work and any modifications or additions
-+      to that Work or Derivative Works thereof, that is intentionally
-+      submitted to Licensor for inclusion in the Work by the copyright owner
-+      or by an individual or Legal Entity authorized to submit on behalf of
-+      the copyright owner. For the purposes of this definition, "submitted"
-+      means any form of electronic, verbal, or written communication sent
-+      to the Licensor or its representatives, including but not limited to
-+      communication on electronic mailing lists, source code control systems,
-+      and issue tracking systems that are managed by, or on behalf of, the
-+      Licensor for the purpose of discussing and improving the Work, but
-+      excluding communication that is conspicuously marked or otherwise
-+      designated in writing by the copyright owner as "Not a Contribution."
-+
-+      "Contributor" shall mean Licensor and any individual or Legal Entity
-+      on behalf of whom a Contribution has been received by Licensor and
-+      subsequently incorporated within the Work.
-+
-+   2. Grant of Copyright License. Subject to the terms and conditions of
-+      this License, each Contributor hereby grants to You a perpetual,
-+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-+      copyright license to reproduce, prepare Derivative Works of,
-+      publicly display, publicly perform, sublicense, and distribute the
-+      Work and such Derivative Works in Source or Object form.
-+
-+   3. Grant of Patent License. Subject to the terms and conditions of
-+      this License, each Contributor hereby grants to You a perpetual,
-+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-+      (except as stated in this section) patent license to make, have made,
-+      use, offer to sell, sell, import, and otherwise transfer the Work,
-+      where such license applies only to those patent claims licensable
-+      by such Contributor that are necessarily infringed by their
-+      Contribution(s) alone or by combination of their Contribution(s)
-+      with the Work to which such Contribution(s) was submitted. If You
-+      institute patent litigation against any entity (including a
-+      cross-claim or counterclaim in a lawsuit) alleging that the Work
-+      or a Contribution incorporated within the Work constitutes direct
-+      or contributory patent infringement, then any patent licenses
-+      granted to You under this License for that Work shall terminate
-+      as of the date such litigation is filed.
-+
-+   4. Redistribution. You may reproduce and distribute copies of the
-+      Work or Derivative Works thereof in any medium, with or without
-+      modifications, and in Source or Object form, provided that You
-+      meet the following conditions:
-+
-+      (a) You must give any other recipients of the Work or
-+          Derivative Works a copy of this License; and
-+
-+      (b) You must cause any modified files to carry prominent notices
-+          stating that You changed the files; and
-+
-+      (c) You must retain, in the Source form of any Derivative Works
-+          that You distribute, all copyright, patent, trademark, and
-+          attribution notices from the Source form of the Work,
-+          excluding those notices that do not pertain to any part of
-+          the Derivative Works; and
-+
-+      (d) If the Work includes a "NOTICE" text file as part of its
-+          distribution, then any Derivative Works that You distribute must
-+          include a readable copy of the attribution notices contained
-+          within such NOTICE file, excluding those notices that do not
-+          pertain to any part of the Derivative Works, in at least one
-+          of the following places: within a NOTICE text file distributed
-+          as part of the Derivative Works; within the Source form or
-+          documentation, if provided along with the Derivative Works; or,
-+          within a display generated by the Derivative Works, if and
-+          wherever such third-party notices normally appear. The contents
-+          of the NOTICE file are for informational purposes only and
-+          do not modify the License. You may add Your own attribution
-+          notices within Derivative Works that You distribute, alongside
-+          or as an addendum to the NOTICE text from the Work, provided
-+          that such additional attribution notices cannot be construed
-+          as modifying the License.
-+
-+      You may add Your own copyright statement to Your modifications and
-+      may provide additional or different license terms and conditions
-+      for use, reproduction, or distribution of Your modifications, or
-+      for any such Derivative Works as a whole, provided Your use,
-+      reproduction, and distribution of the Work otherwise complies with
-+      the conditions stated in this License.
-+
-+   5. Submission of Contributions. Unless You explicitly state otherwise,
-+      any Contribution intentionally submitted for inclusion in the Work
-+      by You to the Licensor shall be under the terms and conditions of
-+      this License, without any additional terms or conditions.
-+      Notwithstanding the above, nothing herein shall supersede or modify
-+      the terms of any separate license agreement you may have executed
-+      with Licensor regarding such Contributions.
-+
-+   6. Trademarks. This License does not grant permission to use the trade
-+      names, trademarks, service marks, or product names of the Licensor,
-+      except as required for reasonable and customary use in describing the
-+      origin of the Work and reproducing the content of the NOTICE file.
-+
-+   7. Disclaimer of Warranty. Unless required by applicable law or
-+      agreed to in writing, Licensor provides the Work (and each
-+      Contributor provides its Contributions) on an "AS IS" BASIS,
-+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-+      implied, including, without limitation, any warranties or conditions
-+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-+      PARTICULAR PURPOSE. You are solely responsible for determining the
-+      appropriateness of using or redistributing the Work and assume any
-+      risks associated with Your exercise of permissions under this License.
-+
-+   8. Limitation of Liability. In no event and under no legal theory,
-+      whether in tort (including negligence), contract, or otherwise,
-+      unless required by applicable law (such as deliberate and grossly
-+      negligent acts) or agreed to in writing, shall any Contributor be
-+      liable to You for damages, including any direct, indirect, special,
-+      incidental, or consequential damages of any character arising as a
-+      result of this License or out of the use or inability to use the
-+      Work (including but not limited to damages for loss of goodwill,
-+      work stoppage, computer failure or malfunction, or any and all
-+      other commercial damages or losses), even if such Contributor
-+      has been advised of the possibility of such damages.
-+
-+   9. Accepting Warranty or Additional Liability. While redistributing
-+      the Work or Derivative Works thereof, You may choose to offer,
-+      and charge a fee for, acceptance of support, warranty, indemnity,
-+      or other liability obligations and/or rights consistent with this
-+      License. However, in accepting such obligations, You may act only
-+      on Your own behalf and on Your sole responsibility, not on behalf
-+      of any other Contributor, and only if You agree to indemnify,
-+      defend, and hold each Contributor harmless for any liability
-+      incurred by, or claims asserted against, such Contributor by reason
-+      of your accepting any such warranty or additional liability.
-+
-+   END OF TERMS AND CONDITIONS
-+
-+   APPENDIX: How to apply the Apache License to your work.
-+
-+      To apply the Apache License to your work, attach the following
-+      boilerplate notice, with the fields enclosed by brackets "[]"
-+      replaced with your own identifying information. (Don't include
-+      the brackets!)  The text should be enclosed in the appropriate
-+      comment syntax for the file format. We also recommend that a
-+      file or class name and description of purpose be included on the
-+      same "printed page" as the copyright notice for easier
-+      identification within third-party archives.
-+
-+   Copyright [yyyy] [name of copyright owner]
-+
-+   Licensed under the Apache License, Version 2.0 (the "License");
-+   you may not use this file except in compliance with the License.
-+   You may obtain a copy of the License at
-+
-+       http://www.apache.org/licenses/LICENSE-2.0
-+
-+   Unless required by applicable law or agreed to in writing, software
-+   distributed under the License is distributed on an "AS IS" BASIS,
-+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+   See the License for the specific language governing permissions and
-+   limitations under the License.
-\ No newline at end of file
+diff --git a/setup.py b/setup.py
+index 14d9fa3..21e2cd1 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1231,6 +1231,7 @@ def main() -> None:
+         "utils/model_dump/*.mjs",
+         "_dynamo/graph_break_registry.json",
+         "tools/dynamo/gb_id_mapping.py",
++        "webgpu/licenses/*.txt",
+     ]
+ 
+     if not BUILD_LIBTORCH_WHL:
 diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
-index 4587c64..2c040b4 100644
+index 4587c64..99537ce 100644
 --- a/torch/CMakeLists.txt
 +++ b/torch/CMakeLists.txt
-@@ -39,6 +39,10 @@ set(TORCH_PYTHON_SRCS
+@@ -39,6 +39,18 @@ set(TORCH_PYTHON_SRCS
      ${GENERATED_CXX_PYTHON}
      )
  append_filelist("libtorch_python_core_sources" TORCH_PYTHON_SRCS)
 +if(EMSCRIPTEN)
 +  list(APPEND TORCH_PYTHON_SRCS
-+    ${TORCH_SRC_DIR}/csrc/webgpu/webgpu_backend.cpp)
++    ${TORCH_SRC_DIR}/csrc/webgpu/webgpu_backend.cpp
++    ${TORCH_SRC_DIR}/csrc/webgpu/webgpu_context.cpp
++    ${TORCH_SRC_DIR}/csrc/webgpu/emdawnwebgpu_bridge.cpp
++    ${TORCH_SRC_DIR}/csrc/webgpu/browser_ops.cpp
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/binary.cpp
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/unary.cpp
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/activation_functions.cpp
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/trig.cpp
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/scalar_unary.cpp)
 +endif()
  
  # NB: This has to match the condition under which the JIT test directory
  #     is included (at the time of writing that's in caffe2/CMakeLists.txt).
+@@ -76,6 +88,15 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
+     ${TORCH_SRC_DIR}/standalone
+     )
+ 
++if(EMSCRIPTEN)
++  list(PREPEND TORCH_PYTHON_INCLUDE_DIRECTORIES
++    ${TORCH_SRC_DIR}/csrc/webgpu/compat
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops
++    ${TORCH_ROOT}/third_party/emdawnwebgpu/webgpu/include
++    ${TORCH_ROOT}/third_party/emdawnwebgpu/webgpu_cpp/include)
++endif()
++
+ list(APPEND TORCH_PYTHON_INCLUDE_DIRECTORIES ${LIBSHM_SRCDIR})
+ 
+ set(TORCH_PYTHON_LINK_LIBRARIES
 diff --git a/torch/__init__.py b/torch/__init__.py
 index 10d44e6..addb63b 100644
 --- a/torch/__init__.py
@@ -251,25 +88,1309 @@ index 10d44e6..addb63b 100644
  from torch import _logging
  
  
+diff --git a/torch/csrc/webgpu/browser_ops.cpp b/torch/csrc/webgpu/browser_ops.cpp
+new file mode 100644
+index 0000000..3ee45d7
+--- /dev/null
++++ b/torch/csrc/webgpu/browser_ops.cpp
+@@ -0,0 +1,541 @@
++// Browser-safe registrations built from torch-webgpu's existing C++ dispatch
++// helpers and WGSL. This file intentionally omits every upstream registration
++// that can synchronously read back or invoke a CPU fallback.
++
++#include <ATen/ATen.h>
++#include <ATen/TensorIterator.h>
++#include <ATen/core/grad_mode.h>
++#include <torch/library.h>
++#include <webgpu/webgpu_cpp.h>
++
++#include "binary.h"
++#include "core/webgpu_allocator.h"
++#include "core/webgpu_context.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++namespace torch_webgpu::browser_ops {
++namespace {
++
++using torch_webgpu::core::WebGPUAllocation;
++using torch_webgpu::ops::BinaryOp;
++
++void check_float_webgpu(const at::Tensor& tensor, const char* operation) {
++  TORCH_CHECK(
++      tensor.device().is_privateuseone(), operation, " expects a WebGPU tensor");
++  TORCH_CHECK(
++      tensor.scalar_type() == at::kFloat,
++      operation,
++      " supports only torch.float32");
++  TORCH_CHECK(
++      !at::GradMode::is_enabled() || !tensor.requires_grad(),
++      "WebGPU autograd is not supported; use `torch.no_grad()` for inference");
++}
++
++std::uint32_t checked_u32(std::int64_t value, const char* description) {
++  TORCH_CHECK(
++      value >= 0 &&
++          static_cast<std::uint64_t>(value) <=
++              std::numeric_limits<std::uint32_t>::max(),
++      description,
++      " does not fit in uint32 WebGPU metadata");
++  return static_cast<std::uint32_t>(value);
++}
++
++template <BinaryOp Op>
++at::Tensor& binary_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha,
++    at::Tensor& output) {
++  check_float_webgpu(lhs, "WebGPU binary operation");
++  check_float_webgpu(rhs, "WebGPU binary operation");
++  check_float_webgpu(output, "WebGPU binary output");
++  TORCH_CHECK(lhs.device() == rhs.device() && lhs.device() == output.device());
++
++  at::TensorIteratorConfig config;
++  config.set_check_mem_overlap(true);
++  config.add_output(output);
++  config.add_input(lhs);
++  config.add_input(rhs);
++  config.check_all_same_dtype(true);
++  config.check_all_same_device(true);
++  auto iterator = config.build();
++  torch_webgpu::ops::run_binary_kernel<Op>(iterator, alpha);
++  return output;
++}
++
++template <BinaryOp Op>
++at::Tensor binary_tensor(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha = 1) {
++  check_float_webgpu(lhs, "WebGPU binary operation");
++  check_float_webgpu(rhs, "WebGPU binary operation");
++  TORCH_CHECK(
++      lhs.device() == rhs.device(),
++      "WebGPU binary operations do not implicitly transfer CPU tensors");
++  auto output = at::empty(at::infer_size(lhs.sizes(), rhs.sizes()), lhs.options());
++  if (output.numel() == 0) {
++    return output;
++  }
++  binary_out<Op>(lhs, rhs, alpha, output);
++  return output;
++}
++
++at::Tensor add_tensor(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha) {
++  return binary_tensor<BinaryOp::Add>(lhs, rhs, alpha);
++}
++
++at::Tensor& add_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha,
++    at::Tensor& output) {
++  return binary_out<BinaryOp::Add>(lhs, rhs, alpha, output);
++}
++
++at::Tensor mul_tensor(const at::Tensor& lhs, const at::Tensor& rhs) {
++  return binary_tensor<BinaryOp::Mul>(lhs, rhs);
++}
++
++at::Tensor& mul_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    at::Tensor& output) {
++  return binary_out<BinaryOp::Mul>(lhs, rhs, 1, output);
++}
++
++at::Tensor sub_tensor(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha) {
++  return binary_tensor<BinaryOp::Sub>(lhs, rhs, alpha);
++}
++
++at::Tensor& sub_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha,
++    at::Tensor& output) {
++  return binary_out<BinaryOp::Sub>(lhs, rhs, alpha, output);
++}
++
++at::Tensor div_tensor(const at::Tensor& lhs, const at::Tensor& rhs) {
++  return binary_tensor<BinaryOp::Div>(lhs, rhs);
++}
++
++at::Tensor& div_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    at::Tensor& output) {
++  return binary_out<BinaryOp::Div>(lhs, rhs, 1, output);
++}
++
++struct ComputeKernel {
++  wgpu::BindGroupLayout bind_group_layout;
++  wgpu::ComputePipeline pipeline;
++};
++
++ComputeKernel make_kernel(
++    const char* label,
++    const std::string& shader,
++    const std::vector<wgpu::BufferBindingType>& binding_types) {
++  wgpu::ShaderSourceWGSL shader_source{
++      wgpu::ShaderSourceWGSL::Init{
++          nullptr,
++          wgpu::StringView{shader.c_str(), shader.size()}}};
++  wgpu::ShaderModuleDescriptor shader_descriptor{};
++  shader_descriptor.nextInChain = &shader_source;
++  shader_descriptor.label = label;
++  auto& context = torch_webgpu::core::getWebGPUContext();
++  auto shader_module =
++      context.getDevice().CreateShaderModule(&shader_descriptor);
++
++  std::vector<wgpu::BindGroupLayoutEntry> entries(binding_types.size());
++  for (std::size_t index = 0; index < binding_types.size(); ++index) {
++    entries[index].binding = static_cast<std::uint32_t>(index);
++    entries[index].visibility = wgpu::ShaderStage::Compute;
++    entries[index].buffer.type = binding_types[index];
++    entries[index].buffer.hasDynamicOffset = false;
++    entries[index].buffer.minBindingSize = 0;
++  }
++  wgpu::BindGroupLayoutDescriptor layout_descriptor{};
++  layout_descriptor.entryCount = entries.size();
++  layout_descriptor.entries = entries.data();
++  auto bind_group_layout =
++      context.getDevice().CreateBindGroupLayout(&layout_descriptor);
++
++  wgpu::PipelineLayoutDescriptor pipeline_layout_descriptor{};
++  pipeline_layout_descriptor.bindGroupLayoutCount = 1;
++  pipeline_layout_descriptor.bindGroupLayouts = &bind_group_layout;
++  auto pipeline_layout =
++      context.getDevice().CreatePipelineLayout(&pipeline_layout_descriptor);
++
++  wgpu::ComputePipelineDescriptor pipeline_descriptor{};
++  pipeline_descriptor.layout = pipeline_layout;
++  pipeline_descriptor.compute.module = shader_module;
++  pipeline_descriptor.compute.entryPoint = wgpu::StringView{"main", 4};
++  auto pipeline =
++      context.getDevice().CreateComputePipeline(&pipeline_descriptor);
++  TORCH_CHECK(
++      bind_group_layout != nullptr && pipeline != nullptr,
++      "failed to create ",
++      label,
++      " WebGPU pipeline");
++  return {std::move(bind_group_layout), std::move(pipeline)};
++}
++
++const std::string& mm_shader() {
++  // Verbatim executable WGSL from torch-webgpu csrc/shaders/mm.wgsl at
++  // a4369ff0f61f4e58cbffb048cee85047b33dacba (comments omitted).
++  static const std::string shader = R"wgsl(
++const MAX_DIMS: u32 = 8u;
++
++struct Params {
++    M: u32,
++    N: u32,
++    K: u32,
++    _pad: u32,
++    self_offset: u32,
++    mat2_offset: u32,
++    out_offset: u32,
++    _pad2: u32,
++    self_strides: array<u32, MAX_DIMS>,
++    mat2_strides: array<u32, MAX_DIMS>,
++    out_strides: array<u32, MAX_DIMS>,
++};
++
++@group(0) @binding(0) var<storage, read> A: array<f32>;
++@group(0) @binding(1) var<storage, read> B: array<f32>;
++@group(0) @binding(2) var<storage, read_write> C: array<f32>;
++@group(0) @binding(3) var<uniform> params: Params;
++
++const wsx: u32 = 16u;
++const wsy: u32 = 16u;
++const wsz: u32 = 1u;
++
++@compute @workgroup_size(wsx, wsy)
++fn main(
++    @builtin(workgroup_id) wid: vec3<u32>,
++    @builtin(local_invocation_index) li: u32,
++    @builtin(num_workgroups) nwg: vec3<u32>) {
++    let workgroup_index = wid.x + nwg.x * wid.y + nwg.x * nwg.y * wid.z;
++    let index = workgroup_index * (wsx * wsy * wsz) + li;
++    if (index >= params.M * params.K) { return; }
++    let row = index / params.K;
++    let column = index % params.K;
++    var output: f32 = 0.0;
++    for (var i: u32 = 0u; i < params.N; i++) {
++        let a = params.self_offset + row * params.self_strides[0] +
++            i * params.self_strides[1];
++        let b = params.mat2_offset + i * params.mat2_strides[0] +
++            column * params.mat2_strides[1];
++        output += A[a] * B[b];
++    }
++    C[params.out_offset + index] = output;
++}
++)wgsl";
++  return shader;
++}
++
++ComputeKernel& mm_kernel() {
++  static ComputeKernel kernel = make_kernel(
++      "torch-webgpu mm",
++      mm_shader(),
++      {wgpu::BufferBindingType::ReadOnlyStorage,
++       wgpu::BufferBindingType::ReadOnlyStorage,
++       wgpu::BufferBindingType::Storage,
++       wgpu::BufferBindingType::Uniform});
++  return kernel;
++}
++
++at::Tensor& mm_out(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    at::Tensor& output) {
++  check_float_webgpu(lhs, "WebGPU mm");
++  check_float_webgpu(rhs, "WebGPU mm");
++  check_float_webgpu(output, "WebGPU mm output");
++  TORCH_CHECK(lhs.dim() == 2 && rhs.dim() == 2, "WebGPU mm expects matrices");
++  TORCH_CHECK(lhs.size(1) == rhs.size(0), "WebGPU mm shape mismatch");
++  TORCH_CHECK(
++      output.dim() == 2 && output.size(0) == lhs.size(0) &&
++          output.size(1) == rhs.size(1),
++      "WebGPU mm output shape mismatch");
++  TORCH_CHECK(output.is_contiguous(), "WebGPU mm output must be contiguous");
++  if (output.numel() == 0) {
++    return output;
++  }
++
++  struct Params {
++    std::uint32_t m;
++    std::uint32_t n;
++    std::uint32_t k;
++    std::uint32_t pad;
++    std::uint32_t lhs_offset;
++    std::uint32_t rhs_offset;
++    std::uint32_t output_offset;
++    std::uint32_t pad2;
++    std::uint32_t lhs_strides[8];
++    std::uint32_t rhs_strides[8];
++    std::uint32_t output_strides[8];
++  };
++  static_assert(sizeof(Params) == 128);
++  Params params{};
++  params.m = checked_u32(lhs.size(0), "mm M");
++  params.n = checked_u32(lhs.size(1), "mm N");
++  params.k = checked_u32(rhs.size(1), "mm K");
++  params.lhs_offset = checked_u32(lhs.storage_offset(), "mm lhs offset");
++  params.rhs_offset = checked_u32(rhs.storage_offset(), "mm rhs offset");
++  params.output_offset =
++      checked_u32(output.storage_offset(), "mm output offset");
++  params.lhs_strides[0] = checked_u32(lhs.stride(0), "mm lhs stride 0");
++  params.lhs_strides[1] = checked_u32(lhs.stride(1), "mm lhs stride 1");
++  params.rhs_strides[0] = checked_u32(rhs.stride(0), "mm rhs stride 0");
++  params.rhs_strides[1] = checked_u32(rhs.stride(1), "mm rhs stride 1");
++  params.output_strides[0] =
++      checked_u32(output.stride(0), "mm output stride 0");
++  params.output_strides[1] =
++      checked_u32(output.stride(1), "mm output stride 1");
++
++  auto* lhs_allocation =
++      static_cast<WebGPUAllocation*>(lhs.storage().data_ptr().get());
++  auto* rhs_allocation =
++      static_cast<WebGPUAllocation*>(rhs.storage().data_ptr().get());
++  auto* output_allocation =
++      static_cast<WebGPUAllocation*>(output.storage().data_ptr().get());
++  TORCH_CHECK(lhs_allocation && rhs_allocation && output_allocation);
++
++  auto& context = torch_webgpu::core::getWebGPUContext();
++  wgpu::BufferDescriptor uniform_descriptor{};
++  uniform_descriptor.label = "torch-webgpu mm params";
++  uniform_descriptor.usage =
++      wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
++  uniform_descriptor.size = sizeof(Params);
++  auto params_buffer =
++      context.getDevice().CreateBuffer(&uniform_descriptor);
++  context.getQueue().WriteBuffer(params_buffer, 0, &params, sizeof(params));
++
++  auto& kernel = mm_kernel();
++  wgpu::BindGroupEntry entries[4]{};
++  entries[0].binding = 0;
++  entries[0].buffer = lhs_allocation->buffer;
++  entries[0].size = lhs_allocation->buffer.GetSize();
++  entries[1].binding = 1;
++  entries[1].buffer = rhs_allocation->buffer;
++  entries[1].size = rhs_allocation->buffer.GetSize();
++  entries[2].binding = 2;
++  entries[2].buffer = output_allocation->buffer;
++  entries[2].size = output_allocation->buffer.GetSize();
++  entries[3].binding = 3;
++  entries[3].buffer = params_buffer;
++  entries[3].size = sizeof(Params);
++  wgpu::BindGroupDescriptor bind_group_descriptor{};
++  bind_group_descriptor.layout = kernel.bind_group_layout;
++  bind_group_descriptor.entryCount = 4;
++  bind_group_descriptor.entries = entries;
++  auto bind_group =
++      context.getDevice().CreateBindGroup(&bind_group_descriptor);
++
++  auto encoder = context.getDevice().CreateCommandEncoder();
++  auto pass = encoder.BeginComputePass();
++  pass.SetPipeline(kernel.pipeline);
++  pass.SetBindGroup(0, bind_group);
++  pass.DispatchWorkgroups((params.m + 15) / 16, (params.k + 15) / 16, 1);
++  pass.End();
++  auto command_buffer = encoder.Finish();
++  context.getQueue().Submit(1, &command_buffer);
++  return output;
++}
++
++at::Tensor mm(const at::Tensor& lhs, const at::Tensor& rhs) {
++  check_float_webgpu(lhs, "WebGPU mm");
++  check_float_webgpu(rhs, "WebGPU mm");
++  TORCH_CHECK(lhs.dim() == 2 && rhs.dim() == 2, "WebGPU mm expects matrices");
++  TORCH_CHECK(lhs.size(1) == rhs.size(0), "WebGPU mm shape mismatch");
++  auto output = at::empty({lhs.size(0), rhs.size(1)}, lhs.options());
++  return mm_out(lhs, rhs, output);
++}
++
++const std::string& softmax_shader() {
++  // Executable WGSL from torch-webgpu csrc/ops/softmax.cpp at the pinned
++  // commit, retained as a single-invocation-per-row reference kernel.
++  static const std::string shader = R"wgsl(
++struct Params {
++    batch_size: u32,
++    dim_size: u32,
++    self_offset: u32,
++    out_offset: u32,
++};
++@group(0) @binding(0) var<storage, read> input: array<f32>;
++@group(0) @binding(1) var<storage, read_write> output: array<f32>;
++@group(0) @binding(2) var<uniform> params: Params;
++
++@compute @workgroup_size(64)
++fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
++    let batch = gid.x;
++    if (batch >= params.batch_size) { return; }
++    let input_base = params.self_offset + batch * params.dim_size;
++    let output_base = params.out_offset + batch * params.dim_size;
++    var maximum = input[input_base];
++    for (var i: u32 = 1u; i < params.dim_size; i++) {
++        maximum = max(maximum, input[input_base + i]);
++    }
++    var sum: f32 = 0.0;
++    for (var i: u32 = 0u; i < params.dim_size; i++) {
++        let value = exp(input[input_base + i] - maximum);
++        output[output_base + i] = value;
++        sum += value;
++    }
++    for (var i: u32 = 0u; i < params.dim_size; i++) {
++        output[output_base + i] /= sum;
++    }
++}
++)wgsl";
++  return shader;
++}
++
++ComputeKernel& softmax_kernel() {
++  static ComputeKernel kernel = make_kernel(
++      "torch-webgpu softmax",
++      softmax_shader(),
++      {wgpu::BufferBindingType::ReadOnlyStorage,
++       wgpu::BufferBindingType::Storage,
++       wgpu::BufferBindingType::Uniform});
++  return kernel;
++}
++
++at::Tensor browser_softmax(
++    const at::Tensor& input,
++    std::int64_t dim,
++    std::optional<at::ScalarType> dtype) {
++  check_float_webgpu(input, "WebGPU softmax");
++  if (dim < 0) {
++    dim += input.dim();
++  }
++  TORCH_CHECK(input.dim() > 0 && dim == input.dim() - 1,
++      "browser WebGPU softmax currently supports only the last dimension");
++  TORCH_CHECK(input.is_contiguous(),
++      "browser WebGPU softmax requires contiguous input");
++  TORCH_CHECK(!dtype || *dtype == at::kFloat,
++      "browser WebGPU softmax supports only float32 output");
++  auto output = at::empty_like(input);
++  if (input.numel() == 0) {
++    return output;
++  }
++  TORCH_CHECK(input.size(-1) > 0, "softmax dimension must be non-empty");
++
++  struct Params {
++    std::uint32_t batch_size;
++    std::uint32_t dim_size;
++    std::uint32_t input_offset;
++    std::uint32_t output_offset;
++  };
++  Params params{
++      checked_u32(input.numel() / input.size(-1), "softmax batch size"),
++      checked_u32(input.size(-1), "softmax dimension size"),
++      checked_u32(input.storage_offset(), "softmax input offset"),
++      checked_u32(output.storage_offset(), "softmax output offset")};
++  auto* input_allocation =
++      static_cast<WebGPUAllocation*>(input.storage().data_ptr().get());
++  auto* output_allocation =
++      static_cast<WebGPUAllocation*>(output.storage().data_ptr().get());
++  TORCH_CHECK(input_allocation && output_allocation);
++
++  auto& context = torch_webgpu::core::getWebGPUContext();
++  wgpu::BufferDescriptor uniform_descriptor{};
++  uniform_descriptor.label = "torch-webgpu softmax params";
++  uniform_descriptor.usage =
++      wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
++  uniform_descriptor.size = sizeof(Params);
++  auto params_buffer =
++      context.getDevice().CreateBuffer(&uniform_descriptor);
++  context.getQueue().WriteBuffer(params_buffer, 0, &params, sizeof(params));
++
++  auto& kernel = softmax_kernel();
++  wgpu::BindGroupEntry entries[3]{};
++  entries[0].binding = 0;
++  entries[0].buffer = input_allocation->buffer;
++  entries[0].size = input_allocation->buffer.GetSize();
++  entries[1].binding = 1;
++  entries[1].buffer = output_allocation->buffer;
++  entries[1].size = output_allocation->buffer.GetSize();
++  entries[2].binding = 2;
++  entries[2].buffer = params_buffer;
++  entries[2].size = sizeof(Params);
++  wgpu::BindGroupDescriptor bind_group_descriptor{};
++  bind_group_descriptor.layout = kernel.bind_group_layout;
++  bind_group_descriptor.entryCount = 3;
++  bind_group_descriptor.entries = entries;
++  auto bind_group =
++      context.getDevice().CreateBindGroup(&bind_group_descriptor);
++
++  auto encoder = context.getDevice().CreateCommandEncoder();
++  auto pass = encoder.BeginComputePass();
++  pass.SetPipeline(kernel.pipeline);
++  pass.SetBindGroup(0, bind_group);
++  pass.DispatchWorkgroups((params.batch_size + 63) / 64, 1, 1);
++  pass.End();
++  auto command_buffer = encoder.Finish();
++  context.getQueue().Submit(1, &command_buffer);
++  return output;
++}
++
++at::Tensor& softmax_out(
++    const at::Tensor& input,
++    std::int64_t dim,
++    std::optional<at::ScalarType> dtype,
++    at::Tensor& output) {
++  auto result = browser_softmax(input, dim, dtype);
++  output.copy_(result);
++  return output;
++}
++
++at::Tensor log_softmax(
++    const at::Tensor& input,
++    std::int64_t dim,
++    std::optional<at::ScalarType> dtype) {
++  return at::log(browser_softmax(input, dim, dtype));
++}
++
++at::Tensor unsupported_argmax(
++    const at::Tensor&,
++    std::optional<std::int64_t>,
++    bool) {
++  TORCH_CHECK_NOT_IMPLEMENTED(
++      false,
++      "argmax is unsupported on browser WebGPU because the upstream "
++      "implementation requires synchronous CPU fallback");
++  return {};
++}
++
++} // namespace
++
++TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
++  module.impl("add.Tensor", TORCH_FN(add_tensor));
++  module.impl("add.out", TORCH_FN(add_out));
++  module.impl("mul.Tensor", TORCH_FN(mul_tensor));
++  module.impl("mul.out", TORCH_FN(mul_out));
++  module.impl("sub.Tensor", TORCH_FN(sub_tensor));
++  module.impl("sub.out", TORCH_FN(sub_out));
++  module.impl("div.Tensor", TORCH_FN(div_tensor));
++  module.impl("div.out", TORCH_FN(div_out));
++  module.impl("mm", TORCH_FN(mm));
++  module.impl("mm.out", TORCH_FN(mm_out));
++  module.impl("softmax.int", TORCH_FN(browser_softmax));
++  module.impl("softmax.int_out", TORCH_FN(softmax_out));
++  module.impl("log_softmax.int", TORCH_FN(log_softmax));
++  module.impl("argmax", TORCH_FN(unsupported_argmax));
++}
++
++} // namespace torch_webgpu::browser_ops
+diff --git a/torch/csrc/webgpu/compat/core/webgpu_allocator.h b/torch/csrc/webgpu/compat/core/webgpu_allocator.h
+new file mode 100644
+index 0000000..1e3d5d6
+--- /dev/null
++++ b/torch/csrc/webgpu/compat/core/webgpu_allocator.h
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <webgpu/webgpu_cpp.h>
++
++#include <cstddef>
++#include <utility>
++
++namespace torch_webgpu::core {
++
++// This deliberately matches the allocation object expected by torch-webgpu's
++// existing operator implementations. The wgpu::Buffer is an RAII wrapper over
++// an ID whose browser GPUBuffer is owned by the side-module EM_JS bridge.
++struct WebGPUAllocation {
++  wgpu::Buffer buffer;
++  std::size_t nbytes;
++
++  WebGPUAllocation(wgpu::Buffer&& value, std::size_t size)
++      : buffer(std::move(value)), nbytes(size) {}
++};
++
++} // namespace torch_webgpu::core
+diff --git a/torch/csrc/webgpu/compat/core/webgpu_context.h b/torch/csrc/webgpu/compat/core/webgpu_context.h
+new file mode 100644
+index 0000000..f3c1dc8
+--- /dev/null
++++ b/torch/csrc/webgpu/compat/core/webgpu_context.h
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <webgpu/webgpu_cpp.h>
++
++namespace torch_webgpu::core {
++
++class WebGPUContext {
++ public:
++  void initialize();
++  bool is_initialized() const;
++  wgpu::Device getDevice() const;
++  wgpu::Queue getQueue() const;
++
++ private:
++  wgpu::Device device_;
++  wgpu::Queue queue_;
++};
++
++WebGPUContext& getWebGPUContext();
++
++} // namespace torch_webgpu::core
+diff --git a/torch/csrc/webgpu/emdawnwebgpu_bridge.cpp b/torch/csrc/webgpu/emdawnwebgpu_bridge.cpp
+new file mode 100644
+index 0000000..d0eda48
+--- /dev/null
++++ b/torch/csrc/webgpu/emdawnwebgpu_bridge.cpp
+@@ -0,0 +1,684 @@
++// Side-module compute profile for Emdawnwebgpu's Dawn-style C/C++ headers.
++//
++// Emdawnwebgpu's full library_webgpu*.js implementation is a final-link
++// JavaScript library and therefore cannot be installed by a Pyodide side
++// module. Emscripten's dynamic loader does, however, reconstruct EM_JS bodies
++// exported by a side module. This file implements only the WebGPU C entry
++// points used by the imported torch-webgpu eager kernels and stores browser
++// objects behind opaque 32-bit handles.
++
++#include <emscripten.h>
++#include <webgpu/webgpu.h>
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <vector>
++
++namespace {
++
++struct LayoutEntry {
++  std::uint32_t binding;
++  std::uint32_t visibility;
++  std::uint32_t buffer_type;
++  std::uint32_t min_binding_size;
++};
++
++struct BindEntry {
++  std::uint32_t binding;
++  std::uint32_t buffer;
++  std::uint32_t offset;
++  std::uint32_t size;
++};
++
++static_assert(sizeof(LayoutEntry) == 16);
++static_assert(sizeof(BindEntry) == 16);
++
++template <typename Handle>
++std::uint32_t handle_id(Handle handle) {
++  return static_cast<std::uint32_t>(
++      reinterpret_cast<std::uintptr_t>(handle));
++}
++
++template <typename Handle>
++Handle make_handle(std::uint32_t id) {
++  return reinterpret_cast<Handle>(static_cast<std::uintptr_t>(id));
++}
++
++std::uint32_t checked_u32(std::uint64_t value) {
++  if (value > std::numeric_limits<std::uint32_t>::max()) {
++    return 0;
++  }
++  return static_cast<std::uint32_t>(value);
++}
++
++std::size_t string_length(WGPUStringView value) {
++  if (value.data == nullptr) {
++    return 0;
++  }
++  return value.length == WGPU_STRLEN ? std::strlen(value.data) : value.length;
++}
++
++EM_JS(void, twgpu_add_ref, (std::uint32_t id), {
++  const state = globalThis.__torchWebGPU;
++  const record = state && state.objects && state.objects.get(id >>> 0);
++  if (record) record.refs++;
++});
++
++EM_JS(void, twgpu_release, (std::uint32_t id), {
++  const state = globalThis.__torchWebGPU;
++  const record = state && state.objects && state.objects.get(id >>> 0);
++  if (!record) return;
++  if (record.imported) {
++    // JavaScript owns the base reference for the imported device and queue.
++    // Balance temporary webgpu_cpp RAII copies without deleting that owner.
++    if (record.refs > 1) record.refs--;
++    return;
++  }
++  record.refs--;
++  if (record.refs > 0) return;
++  state.objects.delete(id >>> 0);
++  if (record.type === "buffer") {
++    state.buffers.delete(id >>> 0);
++    if (record.value) record.value.destroy();
++    state.bufferReleases++;
++  }
++  state.resourceReleases++;
++});
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_buffer,
++    (std::uint32_t size,
++     std::uint32_t usage,
++     int mapped_at_creation),
++    {
++      const state = globalThis.__torchWebGPU;
++      if (!state || !state.device || !state.objects || !state.buffers) return 0;
++      const id = state.nextObjectId++ >>> 0;
++      const buffer = state.device.createBuffer({
++        label: "PyTorch WebGPU buffer",
++        size: Math.max(4, size >>> 0),
++        usage: usage >>> 0,
++        mappedAtCreation: !!mapped_at_creation,
++      });
++      state.objects.set(id, {
++        value: buffer,
++        type: "buffer",
++        refs: 1,
++        size: Math.max(4, size >>> 0),
++        imported: false,
++      });
++      state.buffers.set(id, buffer);
++      state.bufferAllocations++;
++      return id;
++    });
++
++EM_JS(void, twgpu_destroy_buffer, (std::uint32_t id), {
++  const state = globalThis.__torchWebGPU;
++  const record = state && state.objects && state.objects.get(id >>> 0);
++  if (record && record.type === "buffer" && record.value) {
++    record.value.destroy();
++  }
++});
++
++EM_JS(double, twgpu_buffer_size, (std::uint32_t id), {
++  const state = globalThis.__torchWebGPU;
++  const record = state && state.objects && state.objects.get(id >>> 0);
++  return record && record.type === "buffer" ? record.size : 0;
++});
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_shader_module,
++    (const char* code, std::uint32_t length),
++    {
++      const state = globalThis.__torchWebGPU;
++      const shader = state.device.createShaderModule({
++        label: "torch-webgpu WGSL",
++        code: UTF8ToString(code >>> 0, length >>> 0),
++      });
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value: shader, type: "shader", refs: 1, imported: false,
++      });
++      state.shaderCompilations++;
++      return id;
++    });
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_bind_group_layout,
++    (const LayoutEntry* entries, std::uint32_t count),
++    {
++      const state = globalThis.__torchWebGPU;
++      const result = [];
++      const base = entries >>> 2;
++      for (let i = 0; i < (count >>> 0); i++) {
++        const offset = base + i * 4;
++        const typeCode = HEAPU32[offset + 2];
++        const type = typeCode === 2 ? "uniform" :
++          typeCode === 3 ? "storage" :
++          typeCode === 4 ? "read-only-storage" : undefined;
++        if (!type) throw new Error(`unsupported WGPUBufferBindingType ${typeCode}`);
++        result.push({
++          binding: HEAPU32[offset],
++          visibility: HEAPU32[offset + 1],
++          buffer: {
++            type,
++            hasDynamicOffset: false,
++            minBindingSize: HEAPU32[offset + 3],
++          },
++        });
++      }
++      const value = state.device.createBindGroupLayout({entries: result});
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "bind-group-layout", refs: 1, imported: false,
++      });
++      return id;
++    });
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_pipeline_layout,
++    (const std::uint32_t* layouts, std::uint32_t count),
++    {
++      const state = globalThis.__torchWebGPU;
++      const values = [];
++      const base = layouts >>> 2;
++      for (let i = 0; i < (count >>> 0); i++) {
++        const record = state.objects.get(HEAPU32[base + i]);
++        if (!record) throw new Error("released bind group layout");
++        values.push(record.value);
++      }
++      const value = state.device.createPipelineLayout({bindGroupLayouts: values});
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "pipeline-layout", refs: 1, imported: false,
++      });
++      return id;
++    });
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_compute_pipeline,
++    (std::uint32_t layout_id,
++     std::uint32_t shader_id,
++     const char* entry_point,
++     std::uint32_t entry_point_length),
++    {
++      const state = globalThis.__torchWebGPU;
++      const layout = state.objects.get(layout_id >>> 0);
++      const shader = state.objects.get(shader_id >>> 0);
++      if (!layout || !shader) throw new Error("released pipeline dependency");
++      const value = state.device.createComputePipeline({
++        layout: layout.value,
++        compute: {
++          "module": shader.value,
++          entryPoint: UTF8ToString(entry_point >>> 0, entry_point_length >>> 0),
++        },
++      });
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "compute-pipeline", refs: 1, imported: false,
++      });
++      state.pipelineCreations++;
++      return id;
++    });
++
++EM_JS(
++    std::uint32_t,
++    twgpu_create_bind_group,
++    (std::uint32_t layout_id,
++     const BindEntry* entries,
++     std::uint32_t count),
++    {
++      const state = globalThis.__torchWebGPU;
++      const layout = state.objects.get(layout_id >>> 0);
++      if (!layout) throw new Error("released bind group layout");
++      const result = [];
++      const base = entries >>> 2;
++      for (let i = 0; i < (count >>> 0); i++) {
++        const offset = base + i * 4;
++        const buffer = state.objects.get(HEAPU32[offset + 1]);
++        if (!buffer) throw new Error("released bind group buffer");
++        result.push({
++          binding: HEAPU32[offset],
++          resource: {
++            buffer: buffer.value,
++            offset: HEAPU32[offset + 2],
++            size: HEAPU32[offset + 3],
++          },
++        });
++      }
++      const value = state.device.createBindGroup({
++        layout: layout.value, entries: result,
++      });
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "bind-group", refs: 1, imported: false,
++      });
++      return id;
++    });
++
++EM_JS(std::uint32_t, twgpu_create_command_encoder, (), {
++  const state = globalThis.__torchWebGPU;
++  const value = state.device.createCommandEncoder();
++  const id = state.nextObjectId++ >>> 0;
++  state.objects.set(id, {
++    value, type: "command-encoder", refs: 1, imported: false,
++  });
++  return id;
++});
++
++EM_JS(
++    std::uint32_t,
++    twgpu_begin_compute_pass,
++    (std::uint32_t encoder_id),
++    {
++      const state = globalThis.__torchWebGPU;
++      const encoder = state.objects.get(encoder_id >>> 0);
++      if (!encoder) throw new Error("released command encoder");
++      const value = encoder.value.beginComputePass();
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "compute-pass", refs: 1, imported: false,
++      });
++      return id;
++    });
++
++EM_JS(
++    void,
++    twgpu_compute_pass_set_pipeline,
++    (std::uint32_t pass_id, std::uint32_t pipeline_id),
++    {
++      const state = globalThis.__torchWebGPU;
++      state.objects.get(pass_id >>> 0).value.setPipeline(
++        state.objects.get(pipeline_id >>> 0).value);
++    });
++
++EM_JS(
++    void,
++    twgpu_compute_pass_set_bind_group,
++    (std::uint32_t pass_id,
++     std::uint32_t group_index,
++     std::uint32_t bind_group_id),
++    {
++      const state = globalThis.__torchWebGPU;
++      state.objects.get(pass_id >>> 0).value.setBindGroup(
++        group_index >>> 0, state.objects.get(bind_group_id >>> 0).value);
++    });
++
++EM_JS(
++    void,
++    twgpu_compute_pass_dispatch,
++    (std::uint32_t pass_id,
++     std::uint32_t x,
++     std::uint32_t y,
++     std::uint32_t z),
++    {
++      const state = globalThis.__torchWebGPU;
++      state.objects.get(pass_id >>> 0).value.dispatchWorkgroups(
++        x >>> 0, y >>> 0, z >>> 0);
++      state.dispatches++;
++    });
++
++EM_JS(void, twgpu_compute_pass_end, (std::uint32_t pass_id), {
++  const state = globalThis.__torchWebGPU;
++  state.objects.get(pass_id >>> 0).value.end();
++});
++
++EM_JS(
++    void,
++    twgpu_encoder_copy_buffer,
++    (std::uint32_t encoder_id,
++     std::uint32_t source_id,
++     std::uint32_t source_offset,
++     std::uint32_t destination_id,
++     std::uint32_t destination_offset,
++     std::uint32_t size),
++    {
++      const state = globalThis.__torchWebGPU;
++      state.objects.get(encoder_id >>> 0).value.copyBufferToBuffer(
++        state.objects.get(source_id >>> 0).value,
++        source_offset >>> 0,
++        state.objects.get(destination_id >>> 0).value,
++        destination_offset >>> 0,
++        size >>> 0);
++      state.gpuCopies++;
++    });
++
++EM_JS(
++    std::uint32_t,
++    twgpu_finish_command_encoder,
++    (std::uint32_t encoder_id),
++    {
++      const state = globalThis.__torchWebGPU;
++      const encoder = state.objects.get(encoder_id >>> 0);
++      const value = encoder.value.finish();
++      const id = state.nextObjectId++ >>> 0;
++      state.objects.set(id, {
++        value, type: "command-buffer", refs: 1, imported: false,
++      });
++      return id;
++    });
++
++EM_JS(
++    void,
++    twgpu_queue_submit,
++    (const std::uint32_t* commands, std::uint32_t count),
++    {
++      const state = globalThis.__torchWebGPU;
++      const result = [];
++      const base = commands >>> 2;
++      for (let i = 0; i < (count >>> 0); i++) {
++        const record = state.objects.get(HEAPU32[base + i]);
++        if (!record) throw new Error("released command buffer");
++        result.push(record.value);
++      }
++      state.queue.submit(result);
++      state.commandSubmissions++;
++    });
++
++EM_JS(
++    void,
++    twgpu_queue_write_buffer,
++    (std::uint32_t buffer_id,
++     std::uint32_t buffer_offset,
++     const void* data,
++     std::uint32_t size),
++    {
++      const state = globalThis.__torchWebGPU;
++      const buffer = state.objects.get(buffer_id >>> 0);
++      if (!buffer) throw new Error("released destination buffer");
++      // HEAPU8 is read synchronously. Do not retain this view across an await;
++      // Pyodide uses growable Wasm memory and refreshes its global heap views.
++      state.queue.writeBuffer(
++        buffer.value,
++        buffer_offset >>> 0,
++        HEAPU8,
++        data >>> 0,
++        size >>> 0);
++      state.uploads++;
++    });
++
++} // namespace
++
++extern "C" {
++
++WGPUBuffer wgpuDeviceCreateBuffer(
++    WGPUDevice,
++    const WGPUBufferDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->mappedAtCreation ||
++      descriptor->nextInChain != nullptr) {
++    return nullptr;
++  }
++  const auto size = checked_u32(descriptor->size);
++  const auto usage = checked_u32(descriptor->usage);
++  if (size == 0 && descriptor->size != 0) {
++    return nullptr;
++  }
++  return make_handle<WGPUBuffer>(twgpu_create_buffer(size, usage, 0));
++}
++
++void wgpuBufferDestroy(WGPUBuffer buffer) {
++  twgpu_destroy_buffer(handle_id(buffer));
++}
++
++std::uint64_t wgpuBufferGetSize(WGPUBuffer buffer) {
++  return static_cast<std::uint64_t>(twgpu_buffer_size(handle_id(buffer)));
++}
++
++WGPUShaderModule wgpuDeviceCreateShaderModule(
++    WGPUDevice,
++    const WGPUShaderModuleDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->nextInChain == nullptr ||
++      descriptor->nextInChain->sType != WGPUSType_ShaderSourceWGSL) {
++    return nullptr;
++  }
++  const auto* source = reinterpret_cast<const WGPUShaderSourceWGSL*>(
++      descriptor->nextInChain);
++  const auto length = string_length(source->code);
++  if (source->code.data == nullptr ||
++      length > std::numeric_limits<std::uint32_t>::max()) {
++    return nullptr;
++  }
++  return make_handle<WGPUShaderModule>(twgpu_create_shader_module(
++      source->code.data, static_cast<std::uint32_t>(length)));
++}
++
++WGPUBindGroupLayout wgpuDeviceCreateBindGroupLayout(
++    WGPUDevice,
++    const WGPUBindGroupLayoutDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->nextInChain != nullptr ||
++      descriptor->entryCount > std::numeric_limits<std::uint32_t>::max()) {
++    return nullptr;
++  }
++  std::vector<LayoutEntry> entries;
++  entries.reserve(descriptor->entryCount);
++  for (std::size_t index = 0; index < descriptor->entryCount; ++index) {
++    const auto& entry = descriptor->entries[index];
++    if (entry.nextInChain != nullptr || entry.bindingArraySize != 0 ||
++        entry.buffer.nextInChain != nullptr ||
++        entry.buffer.hasDynamicOffset) {
++      return nullptr;
++    }
++    const auto min_size = checked_u32(entry.buffer.minBindingSize);
++    if (min_size == 0 && entry.buffer.minBindingSize != 0) {
++      return nullptr;
++    }
++    entries.push_back({
++        entry.binding,
++        checked_u32(entry.visibility),
++        static_cast<std::uint32_t>(entry.buffer.type),
++        min_size});
++  }
++  return make_handle<WGPUBindGroupLayout>(twgpu_create_bind_group_layout(
++      entries.data(), static_cast<std::uint32_t>(entries.size())));
++}
++
++WGPUPipelineLayout wgpuDeviceCreatePipelineLayout(
++    WGPUDevice,
++    const WGPUPipelineLayoutDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->nextInChain != nullptr ||
++      descriptor->bindGroupLayoutCount >
++          std::numeric_limits<std::uint32_t>::max()) {
++    return nullptr;
++  }
++  std::vector<std::uint32_t> layouts;
++  layouts.reserve(descriptor->bindGroupLayoutCount);
++  for (std::size_t index = 0; index < descriptor->bindGroupLayoutCount;
++       ++index) {
++    layouts.push_back(handle_id(descriptor->bindGroupLayouts[index]));
++  }
++  return make_handle<WGPUPipelineLayout>(twgpu_create_pipeline_layout(
++      layouts.data(), static_cast<std::uint32_t>(layouts.size())));
++}
++
++WGPUComputePipeline wgpuDeviceCreateComputePipeline(
++    WGPUDevice,
++    const WGPUComputePipelineDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->nextInChain != nullptr ||
++      descriptor->compute.nextInChain != nullptr ||
++      descriptor->compute.constantCount != 0 ||
++      descriptor->layout == nullptr || descriptor->compute.module == nullptr) {
++    return nullptr;
++  }
++  const auto length = string_length(descriptor->compute.entryPoint);
++  if (descriptor->compute.entryPoint.data == nullptr ||
++      length > std::numeric_limits<std::uint32_t>::max()) {
++    return nullptr;
++  }
++  return make_handle<WGPUComputePipeline>(twgpu_create_compute_pipeline(
++      handle_id(descriptor->layout),
++      handle_id(descriptor->compute.module),
++      descriptor->compute.entryPoint.data,
++      static_cast<std::uint32_t>(length)));
++}
++
++WGPUBindGroup wgpuDeviceCreateBindGroup(
++    WGPUDevice,
++    const WGPUBindGroupDescriptor* descriptor) {
++  if (descriptor == nullptr || descriptor->nextInChain != nullptr ||
++      descriptor->layout == nullptr ||
++      descriptor->entryCount > std::numeric_limits<std::uint32_t>::max()) {
++    return nullptr;
++  }
++  std::vector<BindEntry> entries;
++  entries.reserve(descriptor->entryCount);
++  for (std::size_t index = 0; index < descriptor->entryCount; ++index) {
++    const auto& entry = descriptor->entries[index];
++    const auto offset = checked_u32(entry.offset);
++    const auto size = checked_u32(entry.size);
++    if (entry.nextInChain != nullptr || entry.buffer == nullptr ||
++        entry.sampler != nullptr || entry.textureView != nullptr ||
++        (offset == 0 && entry.offset != 0) ||
++        (size == 0 && entry.size != 0)) {
++      return nullptr;
++    }
++    entries.push_back({entry.binding, handle_id(entry.buffer), offset, size});
++  }
++  return make_handle<WGPUBindGroup>(twgpu_create_bind_group(
++      handle_id(descriptor->layout),
++      entries.data(),
++      static_cast<std::uint32_t>(entries.size())));
++}
++
++WGPUCommandEncoder wgpuDeviceCreateCommandEncoder(
++    WGPUDevice,
++    const WGPUCommandEncoderDescriptor* descriptor) {
++  if (descriptor != nullptr && descriptor->nextInChain != nullptr) {
++    return nullptr;
++  }
++  return make_handle<WGPUCommandEncoder>(twgpu_create_command_encoder());
++}
++
++WGPUComputePassEncoder wgpuCommandEncoderBeginComputePass(
++    WGPUCommandEncoder encoder,
++    const WGPUComputePassDescriptor* descriptor) {
++  if (descriptor != nullptr &&
++      (descriptor->nextInChain != nullptr ||
++       descriptor->timestampWrites != nullptr)) {
++    return nullptr;
++  }
++  return make_handle<WGPUComputePassEncoder>(
++      twgpu_begin_compute_pass(handle_id(encoder)));
++}
++
++void wgpuComputePassEncoderSetPipeline(
++    WGPUComputePassEncoder pass,
++    WGPUComputePipeline pipeline) {
++  twgpu_compute_pass_set_pipeline(handle_id(pass), handle_id(pipeline));
++}
++
++void wgpuComputePassEncoderSetBindGroup(
++    WGPUComputePassEncoder pass,
++    std::uint32_t group_index,
++    WGPUBindGroup bind_group,
++    std::size_t dynamic_offset_count,
++    const std::uint32_t*) {
++  if (dynamic_offset_count != 0) {
++    return;
++  }
++  twgpu_compute_pass_set_bind_group(
++      handle_id(pass), group_index, handle_id(bind_group));
++}
++
++void wgpuComputePassEncoderDispatchWorkgroups(
++    WGPUComputePassEncoder pass,
++    std::uint32_t x,
++    std::uint32_t y,
++    std::uint32_t z) {
++  twgpu_compute_pass_dispatch(handle_id(pass), x, y, z);
++}
++
++void wgpuComputePassEncoderEnd(WGPUComputePassEncoder pass) {
++  twgpu_compute_pass_end(handle_id(pass));
++}
++
++void wgpuCommandEncoderCopyBufferToBuffer(
++    WGPUCommandEncoder encoder,
++    WGPUBuffer source,
++    std::uint64_t source_offset,
++    WGPUBuffer destination,
++    std::uint64_t destination_offset,
++    std::uint64_t size) {
++  const auto source_offset_u32 = checked_u32(source_offset);
++  const auto destination_offset_u32 = checked_u32(destination_offset);
++  const auto size_u32 = checked_u32(size);
++  if ((source_offset_u32 == 0 && source_offset != 0) ||
++      (destination_offset_u32 == 0 && destination_offset != 0) ||
++      (size_u32 == 0 && size != 0)) {
++    return;
++  }
++  twgpu_encoder_copy_buffer(
++      handle_id(encoder),
++      handle_id(source),
++      source_offset_u32,
++      handle_id(destination),
++      destination_offset_u32,
++      size_u32);
++}
++
++WGPUCommandBuffer wgpuCommandEncoderFinish(
++    WGPUCommandEncoder encoder,
++    const WGPUCommandBufferDescriptor* descriptor) {
++  if (descriptor != nullptr && descriptor->nextInChain != nullptr) {
++    return nullptr;
++  }
++  return make_handle<WGPUCommandBuffer>(
++      twgpu_finish_command_encoder(handle_id(encoder)));
++}
++
++void wgpuQueueSubmit(
++    WGPUQueue,
++    std::size_t command_count,
++    const WGPUCommandBuffer* commands) {
++  if (command_count > std::numeric_limits<std::uint32_t>::max()) {
++    return;
++  }
++  std::vector<std::uint32_t> ids;
++  ids.reserve(command_count);
++  for (std::size_t index = 0; index < command_count; ++index) {
++    ids.push_back(handle_id(commands[index]));
++  }
++  twgpu_queue_submit(ids.data(), static_cast<std::uint32_t>(ids.size()));
++}
++
++void wgpuQueueWriteBuffer(
++    WGPUQueue,
++    WGPUBuffer buffer,
++    std::uint64_t buffer_offset,
++    const void* data,
++    std::size_t size) {
++  const auto offset_u32 = checked_u32(buffer_offset);
++  const auto size_u32 = checked_u32(size);
++  if ((offset_u32 == 0 && buffer_offset != 0) ||
++      (size_u32 == 0 && size != 0)) {
++    return;
++  }
++  twgpu_queue_write_buffer(
++      handle_id(buffer), offset_u32, data, size_u32);
++}
++
++#define TWGPU_REFCOUNT_FUNCTIONS(Name, CType)                         \
++  void wgpu##Name##AddRef(CType handle) { twgpu_add_ref(handle_id(handle)); } \
++  void wgpu##Name##Release(CType handle) { twgpu_release(handle_id(handle)); }
++
++TWGPU_REFCOUNT_FUNCTIONS(BindGroup, WGPUBindGroup)
++TWGPU_REFCOUNT_FUNCTIONS(BindGroupLayout, WGPUBindGroupLayout)
++TWGPU_REFCOUNT_FUNCTIONS(Buffer, WGPUBuffer)
++TWGPU_REFCOUNT_FUNCTIONS(CommandBuffer, WGPUCommandBuffer)
++TWGPU_REFCOUNT_FUNCTIONS(CommandEncoder, WGPUCommandEncoder)
++TWGPU_REFCOUNT_FUNCTIONS(ComputePassEncoder, WGPUComputePassEncoder)
++TWGPU_REFCOUNT_FUNCTIONS(ComputePipeline, WGPUComputePipeline)
++TWGPU_REFCOUNT_FUNCTIONS(Device, WGPUDevice)
++TWGPU_REFCOUNT_FUNCTIONS(PipelineLayout, WGPUPipelineLayout)
++TWGPU_REFCOUNT_FUNCTIONS(Queue, WGPUQueue)
++TWGPU_REFCOUNT_FUNCTIONS(ShaderModule, WGPUShaderModule)
++
++#undef TWGPU_REFCOUNT_FUNCTIONS
++
++} // extern "C"
 diff --git a/torch/csrc/webgpu/webgpu_backend.cpp b/torch/csrc/webgpu/webgpu_backend.cpp
 new file mode 100644
-index 0000000..129c2ae
+index 0000000..00d1a8e
 --- /dev/null
 +++ b/torch/csrc/webgpu/webgpu_backend.cpp
-@@ -0,0 +1,727 @@
-+// Experimental browser WebGPU backend for the Pyodide build.
-+//
-+// Portions of the PrivateUse1 allocator/dispatch structure and binary
-+// TensorIterator WGSL are adapted from torch-webgpu commit
-+// a4369ff0f61f4e58cbffb048cee85047b33dacba
-+// (https://github.com/jmaczan/torch-webgpu), licensed under Apache-2.0; see
-+// third_party/torch-webgpu/LICENSE. This version is modified to use an
-+// Emscripten EM_JS bridge because a Pyodide side module cannot import Dawn's
-+// native wgpu API from the stock Pyodide main module.
+@@ -0,0 +1,380 @@
++// Browser storage, device plumbing, copies, and metadata operators for the
++// torch-webgpu eager-kernel port. Compute dispatch itself uses the pinned
++// Emdawnwebgpu Dawn-style headers through emdawnwebgpu_bridge.cpp.
 +
 +#include <ATen/ATen.h>
 +#include <ATen/EmptyTensor.h>
-+#include <ATen/TensorIterator.h>
 +#include <ATen/core/grad_mode.h>
 +#include <ATen/ops/as_strided_cpu_dispatch.h>
 +#include <ATen/ops/view_cpu_dispatch.h>
@@ -277,248 +1398,25 @@ index 0000000..129c2ae
 +#include <c10/core/Device.h>
 +#include <c10/core/Stream.h>
 +#include <c10/core/impl/DeviceGuardImplInterface.h>
-+#include <emscripten.h>
 +#include <torch/library.h>
++#include <webgpu/webgpu_cpp.h>
 +
-+#include <algorithm>
-+#include <cmath>
++#include "core/webgpu_allocator.h"
++#include "core/webgpu_context.h"
++
 +#include <cstddef>
 +#include <cstdint>
 +#include <limits>
 +#include <optional>
 +#include <utility>
-+#include <vector>
 +
-+namespace torch_webgpu::emscripten_backend {
++namespace torch_webgpu::browser {
 +namespace {
 +
-+EM_JS(int, twgpu_is_ready, (), {
-+  const state = globalThis.__torchWebGPU;
-+  return state && state.device && state.queue && state.buffers ? 1 : 0;
-+});
-+
-+EM_JS(std::uint32_t, twgpu_allocate, (std::uint32_t nbytes), {
-+  const state = globalThis.__torchWebGPU;
-+  if (!state || !state.device || !state.buffers) {
-+    return 0;
-+  }
-+  const id = state.nextBufferId++;
-+  const size = Math.max(4, nbytes >>> 0);
-+  const buffer = state.device.createBuffer({
-+    label: "PyTorch WebGPU tensor",
-+    size,
-+    usage: 0x0004 | 0x0008 | 0x0080,
-+  });
-+  state.buffers.set(id, buffer);
-+  return id;
-+});
-+
-+EM_JS(void, twgpu_release, (std::uint32_t id), {
-+  const state = globalThis.__torchWebGPU;
-+  if (!state || !state.buffers) {
-+    return;
-+  }
-+  const buffer = state.buffers.get(id);
-+  state.buffers.delete(id);
-+  if (buffer) {
-+    // WebGPU defers physical release until already-submitted work is done.
-+    buffer.destroy();
-+  }
-+});
-+
-+EM_JS(
-+    int,
-+    twgpu_write_buffer,
-+    (std::uint32_t id,
-+     std::uint32_t destination_offset,
-+     const void* source,
-+     std::uint32_t nbytes),
-+    {
-+      const state = globalThis.__torchWebGPU;
-+      const buffer = state && state.buffers && state.buffers.get(id);
-+      if (!buffer) {
-+        return 0;
-+      }
-+      state.queue.writeBuffer(
-+          buffer,
-+          destination_offset >>> 0,
-+          HEAPU8,
-+          source >>> 0,
-+          nbytes >>> 0);
-+      return 1;
-+    });
-+
-+EM_JS(
-+    int,
-+    twgpu_copy_buffer,
-+    (std::uint32_t source_id,
-+     std::uint32_t source_offset,
-+     std::uint32_t destination_id,
-+     std::uint32_t destination_offset,
-+     std::uint32_t nbytes),
-+    {
-+      const state = globalThis.__torchWebGPU;
-+      const source = state && state.buffers && state.buffers.get(source_id);
-+      const destination =
-+          state && state.buffers && state.buffers.get(destination_id);
-+      if (!source || !destination) {
-+        return 0;
-+      }
-+      const encoder = state.device.createCommandEncoder({
-+        label: "PyTorch WebGPU copy",
-+      });
-+      encoder.copyBufferToBuffer(
-+          source,
-+          source_offset >>> 0,
-+          destination,
-+          destination_offset >>> 0,
-+          nbytes >>> 0);
-+      state.queue.submit([encoder.finish()]);
-+      state.copySubmissions++;
-+      return 1;
-+    });
-+
-+EM_JS(
-+    int,
-+    twgpu_binary,
-+    (int operation,
-+     std::uint32_t lhs_id,
-+     std::uint32_t rhs_id,
-+     std::uint32_t output_id,
-+     const void* params,
-+     std::uint32_t params_size,
-+     std::uint32_t dispatch_x,
-+     std::uint32_t dispatch_y),
-+    {
-+      const state = globalThis.__torchWebGPU;
-+      const lhs = state && state.buffers && state.buffers.get(lhs_id);
-+      const rhs = state && state.buffers && state.buffers.get(rhs_id);
-+      const output = state && state.buffers && state.buffers.get(output_id);
-+      if (!lhs || !rhs || !output) {
-+        return 0;
-+      }
-+      const name = operation === 0 ? "add" : operation === 1 ? "mul" : "";
-+      if (!name) {
-+        return 0;
-+      }
-+      let pipeline = state.pipelines.get(name);
-+      if (!pipeline) {
-+        const expression =
-+            operation === 0
-+                ? "selfBuffer[idx_self] + params.alpha * otherBuffer[idx_other]"
-+                : "selfBuffer[idx_self] * otherBuffer[idx_other]";
-+        const code = `
-+          const MAX_DIMS: u32 = 8u;
-+          const WORKGROUP_SIZE: u32 = 64u;
-+
-+          struct Params {
-+            length: u32,
-+            ndim: u32,
-+            alpha: f32,
-+            dispatch_x: u32,
-+
-+            out_offset: u32,
-+            self_offset: u32,
-+            other_offset: u32,
-+            _pad2: u32,
-+
-+            out_strides: array<u32, MAX_DIMS>,
-+            self_strides: array<u32, MAX_DIMS>,
-+            other_strides: array<u32, MAX_DIMS>,
-+            shape: array<u32, MAX_DIMS>,
-+          };
-+
-+          @group(0) @binding(0)
-+          var<storage, read> selfBuffer: array<f32>;
-+          @group(0) @binding(1)
-+          var<storage, read> otherBuffer: array<f32>;
-+          @group(0) @binding(2)
-+          var<storage, read_write> outBuffer: array<f32>;
-+          @group(0) @binding(3)
-+          var<uniform> params: Params;
-+
-+          @compute @workgroup_size(64)
-+          fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-+            let i = gid.x + gid.y * params.dispatch_x * WORKGROUP_SIZE;
-+            if (i >= params.length) {
-+              return;
-+            }
-+
-+            var remaining = i;
-+            var coord: array<u32, MAX_DIMS>;
-+            for (var d: i32 = i32(params.ndim) - 1; d >= 0; d--) {
-+              let ud = u32(d);
-+              let size = params.shape[ud];
-+              coord[ud] = remaining % size;
-+              remaining = remaining / size;
-+            }
-+
-+            var idx_out = params.out_offset;
-+            var idx_self = params.self_offset;
-+            var idx_other = params.other_offset;
-+            for (var d: u32 = 0u; d < params.ndim; d++) {
-+              let coordinate = coord[d];
-+              idx_out += coordinate * params.out_strides[d];
-+              idx_self += coordinate * params.self_strides[d];
-+              idx_other += coordinate * params.other_strides[d];
-+            }
-+            outBuffer[idx_out] = ${expression};
-+          }
-+        `;
-+        const module = state.device.createShaderModule({
-+          label: `PyTorch WebGPU ${name}`,
-+          code,
-+        });
-+        pipeline = state.device.createComputePipeline({
-+          label: `PyTorch WebGPU ${name}`,
-+          layout: "auto",
-+          compute: {module, entryPoint: "main"},
-+        });
-+        state.pipelines.set(name, pipeline);
-+      }
-+      const paramsBuffer = state.device.createBuffer({
-+        label: "PyTorch WebGPU binary parameters",
-+        size: params_size >>> 0,
-+        usage: 0x0040 | 0x0008,
-+      });
-+      state.queue.writeBuffer(
-+          paramsBuffer, 0, HEAPU8, params >>> 0, params_size >>> 0);
-+      const bindGroup = state.device.createBindGroup({
-+        label: `PyTorch WebGPU ${name}`,
-+        layout: pipeline.getBindGroupLayout(0),
-+        entries: [
-+          {binding: 0, resource: {buffer: lhs}},
-+          {binding: 1, resource: {buffer: rhs}},
-+          {binding: 2, resource: {buffer: output}},
-+          {binding: 3, resource: {buffer: paramsBuffer}},
-+        ],
-+      });
-+      const encoder = state.device.createCommandEncoder({
-+        label: `PyTorch WebGPU ${name}`,
-+      });
-+      const pass = encoder.beginComputePass();
-+      pass.setPipeline(pipeline);
-+      pass.setBindGroup(0, bindGroup);
-+      pass.dispatchWorkgroups(dispatch_x >>> 0, dispatch_y >>> 0);
-+      pass.end();
-+      state.queue.submit([encoder.finish()]);
-+      paramsBuffer.destroy();
-+      state.kernelSubmissions++;
-+      return 1;
-+    });
-+
-+struct WebGPUAllocation {
-+  std::uint32_t id;
-+  std::size_t nbytes;
-+};
++using core::WebGPUAllocation;
 +
 +void delete_allocation(void* pointer) {
-+  if (!pointer) {
-+    return;
-+  }
-+  auto* allocation = static_cast<WebGPUAllocation*>(pointer);
-+  twgpu_release(allocation->id);
-+  delete allocation;
++  delete static_cast<WebGPUAllocation*>(pointer);
 +}
 +
 +struct WebGPUAllocator final : c10::Allocator {
@@ -531,17 +1429,24 @@ index 0000000..129c2ae
 +          c10::Device(c10::DeviceType::PrivateUse1, 0)};
 +    }
 +    TORCH_CHECK(
-+        twgpu_is_ready(),
++        core::getWebGPUContext().is_initialized(),
 +        "WebGPU is not initialized; call `await torch.webgpu.init()` first");
 +    TORCH_CHECK(
 +        nbytes <= UINT32_MAX - std::size_t(3),
-+        "WebGPU allocation is too large for the browser bridge: ",
++        "WebGPU allocation is too large: ",
 +        nbytes,
 +        " bytes");
 +    const auto aligned_nbytes = (nbytes + 3) & ~std::size_t(3);
-+    const auto id = twgpu_allocate(static_cast<std::uint32_t>(aligned_nbytes));
-+    TORCH_CHECK(id != 0, "WebGPU buffer allocation failed");
-+    auto* allocation = new WebGPUAllocation{id, aligned_nbytes};
++    wgpu::BufferDescriptor descriptor{};
++    descriptor.label = "PyTorch WebGPU tensor";
++    descriptor.size = aligned_nbytes;
++    descriptor.usage = wgpu::BufferUsage::CopyDst |
++        wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::Storage;
++    descriptor.mappedAtCreation = false;
++    auto buffer = core::getWebGPUContext().getDevice().CreateBuffer(&descriptor);
++    TORCH_CHECK(buffer != nullptr, "WebGPU buffer allocation failed");
++    auto* allocation =
++        new WebGPUAllocation(std::move(buffer), aligned_nbytes);
 +    return {
 +        allocation,
 +        allocation,
@@ -554,9 +1459,9 @@ index 0000000..129c2ae
 +  }
 +
 +  void copy_data(
-+      void* destination,
-+      const void* source,
-+      std::size_t count) const override {
++      void*,
++      const void*,
++      std::size_t) const override {
 +    TORCH_CHECK_NOT_IMPLEMENTED(
 +        false,
 +        "WebGPU allocator copy_data is unavailable; use tensor copy operators");
@@ -576,10 +1481,19 @@ index 0000000..129c2ae
 +  return *result;
 +}
 +
++std::uint32_t checked_u32(std::int64_t value, const char* description) {
++  TORCH_CHECK(
++      value >= 0 &&
++          static_cast<std::uint64_t>(value) <=
++              std::numeric_limits<std::uint32_t>::max(),
++      description,
++      " does not fit in uint32 WebGPU metadata");
++  return static_cast<std::uint32_t>(value);
++}
++
 +std::uint32_t checked_nbytes(const at::Tensor& tensor) {
-+  const auto bytes = tensor.numel() * tensor.element_size();
-+  TORCH_CHECK(bytes >= 0 && bytes <= UINT32_MAX, "tensor is too large");
-+  return static_cast<std::uint32_t>(bytes);
++  return checked_u32(
++      tensor.numel() * tensor.element_size(), "tensor byte count");
 +}
 +
 +void check_supported_tensor(
@@ -587,9 +1501,7 @@ index 0000000..129c2ae
 +    const char* operation,
 +    bool require_contiguous = true) {
 +  TORCH_CHECK(
-+      tensor.device().is_privateuseone(),
-+      operation,
-+      " expected a WebGPU tensor");
++      tensor.device().is_privateuseone(), operation, " expected a WebGPU tensor");
 +  TORCH_CHECK(
 +      tensor.scalar_type() == at::kFloat,
 +      operation,
@@ -597,7 +1509,7 @@ index 0000000..129c2ae
 +  TORCH_CHECK(
 +      !require_contiguous || tensor.is_contiguous(),
 +      operation,
-+      " requires contiguous tensors");
++      " requires a contiguous tensor");
 +  TORCH_CHECK(
 +      tensor.storage_offset() >= 0,
 +      operation,
@@ -631,7 +1543,7 @@ index 0000000..129c2ae
 +  void uncheckedSetDevice(c10::Device) const noexcept override {}
 +
 +  c10::DeviceIndex deviceCount() const noexcept override {
-+    return twgpu_is_ready() ? 1 : 0;
++    return core::getWebGPUContext().is_initialized() ? 1 : 0;
 +  }
 +
 +  c10::Stream getStream(c10::Device device) const noexcept override {
@@ -705,9 +1617,7 @@ index 0000000..129c2ae
 +      tensor, size, stride, std::move(storage_offset));
 +}
 +
-+at::Tensor view(
-+    const at::Tensor& tensor,
-+    c10::SymIntArrayRef size) {
++at::Tensor view(const at::Tensor& tensor, c10::SymIntArrayRef size) {
 +  check_supported_tensor(tensor, "WebGPU view", false);
 +  return at::cpu::view_symint(tensor, size);
 +}
@@ -719,14 +1629,12 @@ index 0000000..129c2ae
 +  TORCH_CHECK(source.defined(), "source tensor is not defined");
 +  TORCH_CHECK(destination.defined(), "destination tensor is not defined");
 +
-+  if (source.device().is_cpu() &&
-+      destination.device().is_privateuseone()) {
++  if (source.device().is_cpu() && destination.device().is_privateuseone()) {
 +    check_supported_tensor(destination, "CPU to WebGPU copy");
 +    TORCH_CHECK(
 +        source.scalar_type() == at::kFloat,
 +        "CPU to WebGPU copy supports only torch.float32");
-+    TORCH_CHECK(
-+        source.sizes() == destination.sizes(), "copy shape mismatch");
++    TORCH_CHECK(source.sizes() == destination.sizes(), "copy shape mismatch");
 +    const auto contiguous_source =
 +        source.is_contiguous() ? source : source.contiguous();
 +    const auto nbytes = checked_nbytes(contiguous_source);
@@ -734,21 +1642,18 @@ index 0000000..129c2ae
 +      return destination;
 +    }
 +    auto& destination_allocation = allocation(destination);
-+    const auto destination_offset =
-+        destination.storage_offset() * destination.element_size();
++    const auto destination_offset = checked_u32(
++        destination.storage_offset() * destination.element_size(),
++        "destination byte offset");
 +    TORCH_CHECK(
-+        destination_offset >= 0 &&
-+            static_cast<std::uint64_t>(destination_offset) +
-+                    static_cast<std::uint64_t>(nbytes) <=
-+                static_cast<std::uint64_t>(destination_allocation.nbytes),
++        static_cast<std::uint64_t>(destination_offset) + nbytes <=
++            destination_allocation.nbytes,
 +        "CPU to WebGPU copy exceeds destination storage");
-+    TORCH_CHECK(
-+        twgpu_write_buffer(
-+            destination_allocation.id,
-+            static_cast<std::uint32_t>(destination_offset),
-+            contiguous_source.data_ptr(),
-+            nbytes),
-+        "CPU to WebGPU writeBuffer failed");
++    core::getWebGPUContext().getQueue().WriteBuffer(
++        destination_allocation.buffer,
++        destination_offset,
++        contiguous_source.data_ptr(),
++        nbytes);
 +    return destination;
 +  }
 +
@@ -756,44 +1661,44 @@ index 0000000..129c2ae
 +      destination.device().is_privateuseone()) {
 +    check_supported_tensor(source, "WebGPU copy");
 +    check_supported_tensor(destination, "WebGPU copy");
-+    TORCH_CHECK(
-+        source.sizes() == destination.sizes(), "copy shape mismatch");
++    TORCH_CHECK(source.sizes() == destination.sizes(), "copy shape mismatch");
 +    const auto nbytes = checked_nbytes(source);
 +    if (nbytes == 0) {
 +      return destination;
 +    }
 +    auto& source_allocation = allocation(source);
 +    auto& destination_allocation = allocation(destination);
-+    const auto source_offset = source.storage_offset() * source.element_size();
-+    const auto destination_offset =
-+        destination.storage_offset() * destination.element_size();
++    const auto source_offset = checked_u32(
++        source.storage_offset() * source.element_size(),
++        "source byte offset");
++    const auto destination_offset = checked_u32(
++        destination.storage_offset() * destination.element_size(),
++        "destination byte offset");
 +    TORCH_CHECK(
-+        source_offset >= 0 &&
-+            static_cast<std::uint64_t>(source_offset) +
-+                    static_cast<std::uint64_t>(nbytes) <=
-+                static_cast<std::uint64_t>(source_allocation.nbytes),
++        static_cast<std::uint64_t>(source_offset) + nbytes <=
++            source_allocation.nbytes,
 +        "WebGPU copy exceeds source storage");
 +    TORCH_CHECK(
-+        destination_offset >= 0 &&
-+            static_cast<std::uint64_t>(destination_offset) +
-+                    static_cast<std::uint64_t>(nbytes) <=
-+                static_cast<std::uint64_t>(destination_allocation.nbytes),
++        static_cast<std::uint64_t>(destination_offset) + nbytes <=
++            destination_allocation.nbytes,
 +        "WebGPU copy exceeds destination storage");
-+    if (source_allocation.id == destination_allocation.id) {
++    if (source_allocation.buffer.Get() == destination_allocation.buffer.Get()) {
 +      TORCH_CHECK(
 +          source_offset == destination_offset,
 +          "WebGPU copy between different views of the same GPUBuffer is not "
 +          "supported");
 +      return destination;
 +    }
-+    TORCH_CHECK(
-+        twgpu_copy_buffer(
-+            source_allocation.id,
-+            static_cast<std::uint32_t>(source_offset),
-+            destination_allocation.id,
-+            static_cast<std::uint32_t>(destination_offset),
-+            nbytes),
-+        "WebGPU buffer copy failed");
++    auto encoder =
++        core::getWebGPUContext().getDevice().CreateCommandEncoder();
++    encoder.CopyBufferToBuffer(
++        source_allocation.buffer,
++        source_offset,
++        destination_allocation.buffer,
++        destination_offset,
++        nbytes);
++    auto command_buffer = encoder.Finish();
++    core::getWebGPUContext().getQueue().Submit(1, &command_buffer);
 +    return destination;
 +  }
 +
@@ -812,143 +1717,16 @@ index 0000000..129c2ae
 +      destination.device());
 +}
 +
-+struct BinaryParams {
-+  std::uint32_t length;
-+  std::uint32_t ndim;
-+  float alpha;
-+  std::uint32_t dispatch_x;
-+
-+  std::uint32_t output_offset;
-+  std::uint32_t lhs_offset;
-+  std::uint32_t rhs_offset;
-+  std::uint32_t padding;
-+
-+  std::uint32_t output_strides[8];
-+  std::uint32_t lhs_strides[8];
-+  std::uint32_t rhs_strides[8];
-+  std::uint32_t shape[8];
-+};
-+
-+static_assert(sizeof(BinaryParams) == 160);
-+
-+std::uint32_t checked_u32(std::int64_t value, const char* description) {
-+  TORCH_CHECK(
-+      value >= 0 &&
-+          static_cast<std::uint64_t>(value) <=
-+              std::numeric_limits<std::uint32_t>::max(),
-+      description,
-+      " does not fit in the WebGPU backend's uint32 metadata");
-+  return static_cast<std::uint32_t>(value);
-+}
-+
-+at::Tensor binary(
-+    const at::Tensor& lhs,
-+    const at::Tensor& rhs,
-+    int operation,
-+    float alpha = 1.0f) {
-+  check_supported_tensor(lhs, "WebGPU binary operation", false);
-+  check_supported_tensor(rhs, "WebGPU binary operation", false);
-+  TORCH_CHECK(
-+      !at::GradMode::is_enabled() ||
-+          (!lhs.requires_grad() && !rhs.requires_grad()),
-+      "WebGPU autograd is not supported; use `torch.no_grad()` for inference");
-+  const auto output_shape = at::infer_size(lhs.sizes(), rhs.sizes());
-+  auto output = at::empty(output_shape, lhs.options());
-+  if (output.numel() == 0) {
-+    return output;
-+  }
-+
-+  at::TensorIteratorConfig config;
-+  config.set_check_mem_overlap(true);
-+  config.add_output(output);
-+  config.add_input(lhs);
-+  config.add_input(rhs);
-+  config.check_all_same_dtype(true);
-+  config.check_all_same_device(true);
-+  auto iterator = config.build();
-+
-+  TORCH_CHECK(
-+      iterator.ntensors() == 3 &&
-+          iterator.common_dtype() == at::ScalarType::Float &&
-+          iterator.device_type() == c10::DeviceType::PrivateUse1,
-+      "invalid TensorIterator for WebGPU binary operation");
-+  const auto ndim = iterator.ndim();
-+  TORCH_CHECK(ndim >= 0 && ndim <= 8, "WebGPU supports at most 8 dimensions");
-+
-+  const auto element_size = iterator.element_size(0);
-+  TORCH_CHECK(element_size == sizeof(float));
-+  const auto output_strides_bytes = iterator.strides(0);
-+  const auto lhs_strides_bytes = iterator.strides(1);
-+  const auto rhs_strides_bytes = iterator.strides(2);
-+  const auto shape = iterator.shape();
-+
-+  const auto numel = checked_u32(iterator.numel(), "tensor element count");
-+  const auto num_workgroups =
-+      (numel + std::uint32_t(63)) / std::uint32_t(64);
-+  const auto dispatch_x = std::min(num_workgroups, std::uint32_t(65535));
-+  const auto dispatch_y =
-+      (num_workgroups + std::uint32_t(65534)) / std::uint32_t(65535);
-+
-+  BinaryParams params{};
-+  params.length = numel;
-+  params.ndim = static_cast<std::uint32_t>(ndim);
-+  params.alpha = alpha;
-+  params.dispatch_x = dispatch_x;
-+  params.output_offset =
-+      checked_u32(output.storage_offset(), "output storage offset");
-+  params.lhs_offset = checked_u32(lhs.storage_offset(), "lhs storage offset");
-+  params.rhs_offset = checked_u32(rhs.storage_offset(), "rhs storage offset");
-+  for (std::size_t dimension = 0; dimension < 8; ++dimension) {
-+    params.shape[dimension] = 1;
-+  }
-+  for (std::int64_t dimension = 0; dimension < ndim; ++dimension) {
-+    TORCH_CHECK(
-+        output_strides_bytes[dimension] % element_size == 0 &&
-+            lhs_strides_bytes[dimension] % element_size == 0 &&
-+            rhs_strides_bytes[dimension] % element_size == 0,
-+        "WebGPU tensor stride is not a multiple of element size");
-+    params.output_strides[dimension] = checked_u32(
-+        output_strides_bytes[dimension] / element_size, "output stride");
-+    params.lhs_strides[dimension] = checked_u32(
-+        lhs_strides_bytes[dimension] / element_size, "lhs stride");
-+    params.rhs_strides[dimension] = checked_u32(
-+        rhs_strides_bytes[dimension] / element_size, "rhs stride");
-+    params.shape[dimension] = checked_u32(shape[dimension], "shape dimension");
-+  }
-+
-+  auto& lhs_allocation = allocation(lhs);
-+  auto& rhs_allocation = allocation(rhs);
-+  auto& output_allocation = allocation(output);
-+  TORCH_CHECK(
-+      twgpu_binary(
-+          operation,
-+          lhs_allocation.id,
-+          rhs_allocation.id,
-+          output_allocation.id,
-+          &params,
-+          sizeof(params),
-+          dispatch_x,
-+          dispatch_y),
-+      "WebGPU binary dispatch failed");
-+  return output;
-+}
-+
-+at::Tensor add(
-+    const at::Tensor& lhs,
-+    const at::Tensor& rhs,
-+    const at::Scalar& alpha) {
-+  return binary(lhs, rhs, 0, alpha.to<float>());
-+}
-+
-+at::Tensor multiply(const at::Tensor& lhs, const at::Tensor& rhs) {
-+  return binary(lhs, rhs, 1);
++void initialize() {
++  core::getWebGPUContext().initialize();
 +}
 +
 +std::int64_t buffer_id(const at::Tensor& tensor) {
 +  if (tensor.numel() == 0) {
 +    return 0;
 +  }
-+  return allocation(tensor).id;
++  return static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(
++      allocation(tensor).buffer.Get()));
 +}
 +
 +std::int64_t buffer_nbytes(const at::Tensor& tensor) {
@@ -965,13 +1743,16 @@ index 0000000..129c2ae
 +  module.impl("as_strided", TORCH_FN(as_strided));
 +  module.impl("view", TORCH_FN(view));
 +  module.impl("_copy_from", TORCH_FN(copy_from));
-+  module.impl("add.Tensor", TORCH_FN(add));
-+  module.impl("mul.Tensor", TORCH_FN(multiply));
 +}
 +
 +TORCH_LIBRARY(webgpu, module) {
++  module.def("initialize() -> ()");
 +  module.def("buffer_id(Tensor tensor) -> int");
 +  module.def("buffer_nbytes(Tensor tensor) -> int");
++}
++
++TORCH_LIBRARY_IMPL(webgpu, CatchAll, module) {
++  module.impl("initialize", TORCH_FN(initialize));
 +}
 +
 +TORCH_LIBRARY_IMPL(webgpu, PrivateUse1, module) {
@@ -983,13 +1764,63 @@ index 0000000..129c2ae
 +  module.fallback(torch::CppFunction::makeFallthrough());
 +}
 +
-+} // namespace torch_webgpu::emscripten_backend
++} // namespace torch_webgpu::browser
+diff --git a/torch/csrc/webgpu/webgpu_context.cpp b/torch/csrc/webgpu/webgpu_context.cpp
+new file mode 100644
+index 0000000..23bdf1a
+--- /dev/null
++++ b/torch/csrc/webgpu/webgpu_context.cpp
+@@ -0,0 +1,44 @@
++#include "core/webgpu_context.h"
++
++#include <c10/util/Exception.h>
++
++#include <cstdint>
++
++namespace torch_webgpu::core {
++namespace {
++
++constexpr std::uintptr_t kBrowserDeviceHandle = 1;
++constexpr std::uintptr_t kBrowserQueueHandle = 2;
++
++} // namespace
++
++void WebGPUContext::initialize() {
++  if (is_initialized()) {
++    return;
++  }
++  device_ = wgpu::Device::Acquire(
++      reinterpret_cast<WGPUDevice>(kBrowserDeviceHandle));
++  queue_ = wgpu::Queue::Acquire(
++      reinterpret_cast<WGPUQueue>(kBrowserQueueHandle));
++}
++
++bool WebGPUContext::is_initialized() const {
++  return device_ != nullptr && queue_ != nullptr;
++}
++
++wgpu::Device WebGPUContext::getDevice() const {
++  TORCH_CHECK(is_initialized(), "WebGPU native context is not initialized");
++  return device_;
++}
++
++wgpu::Queue WebGPUContext::getQueue() const {
++  TORCH_CHECK(is_initialized(), "WebGPU native context is not initialized");
++  return queue_;
++}
++
++WebGPUContext& getWebGPUContext() {
++  static WebGPUContext context;
++  return context;
++}
++
++} // namespace torch_webgpu::core
 diff --git a/torch/webgpu/__init__.py b/torch/webgpu/__init__.py
 new file mode 100644
-index 0000000..6671b34
+index 0000000..29befd1
 --- /dev/null
 +++ b/torch/webgpu/__init__.py
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,292 @@
 +"""Experimental browser WebGPU backend for the Pyodide PyTorch build.
 +
 +GPU storage and ATen dispatch are implemented in C++ using PyTorch's
@@ -1061,16 +1892,44 @@ index 0000000..6671b34
 +            raise RuntimeError("the browser did not provide a WebGPU adapter")
 +        device = await _adapter.requestDevice()
 +
++    objects = _js().Map.new()
++    buffers = _js().Map.new()
 +    state = _js_object(
 +        device=device,
 +        queue=device.queue,
-+        buffers=_js().Map.new(),
-+        pipelines=_js().Map.new(),
-+        nextBufferId=1,
-+        kernelSubmissions=0,
-+        copySubmissions=0,
++        objects=objects,
++        buffers=buffers,
++        nextObjectId=3,
++        bufferAllocations=0,
++        bufferReleases=0,
++        resourceReleases=0,
++        uploads=0,
++        gpuCopies=0,
++        shaderCompilations=0,
++        pipelineCreations=0,
++        commandSubmissions=0,
++        dispatches=0,
++        readbacks=0,
++        failedDispatches=0,
++    )
++    objects.set(
++        1,
++        _js_object(
++            value=device, type="device", refs=1, imported=True
++        ),
++    )
++    objects.set(
++        2,
++        _js_object(
++            value=device.queue, type="queue", refs=1, imported=True
++        ),
 +    )
 +    setattr(_js().globalThis, "__torchWebGPU", state)
++    try:
++        torch.ops.webgpu.initialize()
++    except BaseException:
++        setattr(_js().globalThis, "__torchWebGPU", None)
++        raise
 +    _device = device
 +
 +
@@ -1117,6 +1976,7 @@ index 0000000..6671b34
 +        source, source_offset, readback, 0, allocated_nbytes
 +    )
 +    state.queue.submit(_js_array(encoder.finish()))
++    state.readbacks += 1
 +    await readback.mapAsync(_js().GPUMapMode.READ)
 +    try:
 +        mapped = readback.getMappedRange(0, allocated_nbytes)
@@ -1172,11 +2032,47 @@ index 0000000..6671b34
 +
 +
 +def kernel_submissions() -> int:
-+    return int(_state().kernelSubmissions)
++    return int(_state().dispatches)
 +
 +
 +def copy_submissions() -> int:
-+    return int(_state().copySubmissions)
++    return int(_state().gpuCopies)
++
++
++def shader_compilations() -> int:
++    return int(_state().shaderCompilations)
++
++
++def pipeline_creations() -> int:
++    return int(_state().pipelineCreations)
++
++
++def command_submissions() -> int:
++    return int(_state().commandSubmissions)
++
++
++def readback_submissions() -> int:
++    return int(_state().readbacks)
++
++
++def diagnostics() -> dict[str, int]:
++    """Return browser-transport counters used to detect accidental fallback."""
++
++    state = _state()
++    return {
++        "buffer_allocations": int(state.bufferAllocations),
++        "buffer_releases": int(state.bufferReleases),
++        "resource_releases": int(state.resourceReleases),
++        "uploads": int(state.uploads),
++        "gpu_copies": int(state.gpuCopies),
++        "shader_compilations": int(state.shaderCompilations),
++        "pipeline_creations": int(state.pipelineCreations),
++        "command_submissions": int(state.commandSubmissions),
++        "dispatches": int(state.dispatches),
++        "readbacks": int(state.readbacks),
++        "failed_dispatches": int(state.failedDispatches),
++        "cpu_fallbacks": 0,
++    }
 +
 +
 +def cpu_fallbacks() -> int:
@@ -1200,17 +2096,20 @@ index 0000000..6671b34
 +
 +
 +__all__ = [
++    "command_submissions",
 +    "copy_submissions",
 +    "cpu_fallbacks",
 +    "current_device",
++    "diagnostics",
 +    "device_count",
 +    "get_amp_supported_dtype",
 +    "init",
 +    "is_available",
 +    "is_initialized",
 +    "kernel_submissions",
++    "pipeline_creations",
++    "readback_submissions",
++    "shader_compilations",
 +    "synchronize",
 +    "to_cpu_async",
 +]
--- 
-2.51.1

@@ -139,11 +139,14 @@ for WebGPU buffer mapping in stock single-threaded Pyodide, so they are not
 implemented. This is a `PrivateUse1` backend named `webgpu`; it does not claim
 CUDA compatibility and `torch.cuda.is_available()` remains false.
 
-The backend follows the allocator, device-guard, and WGSL dispatch structure
-of [torch-webgpu](https://github.com/jmaczan/torch-webgpu), replacing its
-native Dawn transport with an Emscripten JavaScript bridge embedded in
-`torch._C`. The adapted portions are distributed under Apache-2.0; see
-[Third-party notices](THIRD_PARTY_NOTICES.md).
+The development backend compiles against the exact Dawn-style headers shipped
+with Emdawnwebgpu and reuses pinned torch-webgpu C++ dispatch helpers and WGSL.
+A compute-only C API profile carries browser calls as side-module `EM_JS`
+because full Emdawn JavaScript must be final-linked into a main module and is
+absent from stock Pyodide. See the
+[architecture](docs/webgpu-browser-architecture.md),
+[operator support table](docs/webgpu-operator-support.md), and
+[third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## What works
 
@@ -193,6 +196,8 @@ and every probed test not admitted to CI are documented in
 | [Compatibility](docs/compatibility.md) | Exact source, toolchain, Python, Pyodide, and WebAssembly pins |
 | [Upstream test policy](docs/upstream-tests.md) | Passing tests, explicit exclusions, and collection accommodations |
 | [Build and release](docs/building.md) | Build pipeline, validation, caching, and version updates |
+| [Browser WebGPU architecture](docs/webgpu-browser-architecture.md) | Side-module Emdawn profile, initialization, handles, lifetimes, and memory |
+| [Browser WebGPU operator support](docs/webgpu-operator-support.md) | Verified, compile-only, missing-kernel, fallback, and synchronous-readback status |
 | [Contributing](CONTRIBUTING.md) | Development workflow and pull-request expectations |
 | [Security policy](SECURITY.md) | Vulnerability reporting and release verification |
 

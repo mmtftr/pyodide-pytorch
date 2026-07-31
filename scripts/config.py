@@ -20,6 +20,11 @@ ENV_KEYS = {
     "PYTORCH_REPOSITORY": ("pytorch", "repository"),
     "PYTORCH_REF": ("pytorch", "ref"),
     "PYTORCH_VERSION": ("pytorch", "version"),
+    "TORCH_WEBGPU_REPOSITORY": ("torch_webgpu", "repository"),
+    "TORCH_WEBGPU_REF": ("torch_webgpu", "ref"),
+    "EMDAWNWEBGPU_RELEASE": ("emdawnwebgpu", "release"),
+    "EMDAWNWEBGPU_DAWN_REF": ("emdawnwebgpu", "dawn_ref"),
+    "EMDAWNWEBGPU_ARCHIVE_SHA512": ("emdawnwebgpu", "archive_sha512"),
     "PYODIDE_VERSION": ("pyodide", "version"),
     "PYODIDE_BUILD_VERSION": ("pyodide", "build_version"),
     "PYTHON_VERSION": ("pyodide", "python_version"),
@@ -63,6 +68,15 @@ def validate(config: dict[str, Any]) -> list[str]:
         ref = str(lookup(config, ("pytorch", "ref")))
         repository = str(lookup(config, ("pytorch", "repository")))
         version = str(lookup(config, ("pytorch", "version")))
+        torch_webgpu_repository = str(
+            lookup(config, ("torch_webgpu", "repository"))
+        )
+        torch_webgpu_ref = str(lookup(config, ("torch_webgpu", "ref")))
+        emdawn_release = str(lookup(config, ("emdawnwebgpu", "release")))
+        emdawn_dawn_ref = str(lookup(config, ("emdawnwebgpu", "dawn_ref")))
+        emdawn_archive_sha512 = str(
+            lookup(config, ("emdawnwebgpu", "archive_sha512"))
+        )
         pyodide_version = str(lookup(config, ("pyodide", "version")))
         build_version = str(lookup(config, ("pyodide", "build_version")))
         python_version = str(lookup(config, ("pyodide", "python_version")))
@@ -93,6 +107,18 @@ def validate(config: dict[str, Any]) -> list[str]:
         errors.append("pytorch.repository must use the canonical HTTPS URL")
     if not re.fullmatch(r"[0-9A-Za-z.+!-]+", version):
         errors.append("pytorch.version contains unexpected characters")
+    if torch_webgpu_repository != (
+        "https://github.com/jmaczan/torch-webgpu.git"
+    ):
+        errors.append("torch_webgpu.repository must use the pinned upstream URL")
+    if not re.fullmatch(r"[0-9a-f]{40}", torch_webgpu_ref):
+        errors.append("torch_webgpu.ref must be a full lowercase commit")
+    if not re.fullmatch(r"v\d{8}\.\d{6}", emdawn_release):
+        errors.append("emdawnwebgpu.release must be an exact timestamped release")
+    if not re.fullmatch(r"[0-9a-f]{40}", emdawn_dawn_ref):
+        errors.append("emdawnwebgpu.dawn_ref must be a full lowercase commit")
+    if not re.fullmatch(r"[0-9a-f]{128}", emdawn_archive_sha512):
+        errors.append("emdawnwebgpu.archive_sha512 must be a SHA-512 digest")
     for name, value in (
         ("pyodide.version", pyodide_version),
         ("pyodide.build_version", build_version),

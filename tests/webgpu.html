@@ -34,6 +34,7 @@
       throw new Error("requestAdapter returned null");
     }
     const device = await adapter.requestDevice();
+    device.pushErrorScope("validation");
     device.addEventListener("uncapturederror", (event) => {
       const message = event.error?.message ?? String(event.error);
       window.webgpuTest.validationErrors.push(message);
@@ -64,6 +65,7 @@
 import torch
 import torch.webgpu
 import js
+import gc
 
 assert torch.webgpu.is_available()
 await torch.webgpu.init(device=js.webgpuTestDevice)
@@ -84,6 +86,18 @@ strided_doubled = strided + strided
 transposed = view_base.view(2, 2).transpose(0, 1)
 transposed_doubled = transposed + transposed
 cloned = added.clone()
+relu_result = torch.relu(torch.tensor([-2.0, 0.5, 3.0]).to("webgpu"))
+relu_compile_count = torch.webgpu.shader_compilations()
+relu_again = torch.relu(torch.tensor([-1.0, 2.0]).to("webgpu"))
+assert torch.webgpu.shader_compilations() == relu_compile_count
+mm_result = torch.mm(
+    torch.tensor([[1.0, 2.0], [3.0, 4.0]]).to("webgpu"),
+    torch.tensor([[5.0, 6.0], [7.0, 8.0]]).to("webgpu"),
+)
+softmax_result = torch.softmax(
+    torch.tensor([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]]).to("webgpu"),
+    dim=-1,
+)
 added_cpu = await torch.webgpu.to_cpu_async(added)
 multiplied_cpu = await torch.webgpu.to_cpu_async(multiplied)
 broadcast_cpu = await torch.webgpu.to_cpu_async(broadcast)
@@ -91,6 +105,10 @@ sliced_cpu = await torch.webgpu.to_cpu_async(sliced)
 strided_doubled_cpu = await torch.webgpu.to_cpu_async(strided_doubled)
 transposed_doubled_cpu = await torch.webgpu.to_cpu_async(transposed_doubled)
 cloned_cpu = await torch.webgpu.to_cpu_async(cloned)
+relu_cpu = await torch.webgpu.to_cpu_async(relu_result)
+relu_again_cpu = await torch.webgpu.to_cpu_async(relu_again)
+mm_cpu = await torch.webgpu.to_cpu_async(mm_result)
+softmax_cpu = await torch.webgpu.to_cpu_async(softmax_result)
 
 assert isinstance(added, torch.Tensor)
 assert added.device.type == "webgpu"
@@ -122,9 +140,41 @@ torch.testing.assert_close(
     torch.tensor([[2.0, 6.0], [4.0, 8.0]]),
 )
 torch.testing.assert_close(cloned_cpu, added_cpu)
-assert torch.webgpu.kernel_submissions() == 5
-assert torch.webgpu.copy_submissions() == 1
+torch.testing.assert_close(relu_cpu, torch.tensor([0.0, 0.5, 3.0]))
+torch.testing.assert_close(relu_again_cpu, torch.tensor([0.0, 2.0]))
+torch.testing.assert_close(
+    mm_cpu,
+    torch.tensor([[19.0, 22.0], [43.0, 50.0]]),
+    rtol=1e-5,
+    atol=1e-6,
+)
+torch.testing.assert_close(
+    softmax_cpu,
+    torch.softmax(torch.tensor([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]]), dim=-1),
+    rtol=2e-5,
+    atol=2e-6,
+)
+diagnostics = torch.webgpu.diagnostics()
+assert diagnostics["dispatches"] >= 9
+assert diagnostics["gpu_copies"] >= 1
+assert diagnostics["shader_compilations"] >= 5
+assert diagnostics["pipeline_creations"] >= 5
+assert diagnostics["command_submissions"] >= diagnostics["dispatches"]
+assert diagnostics["readbacks"] >= 11
+assert diagnostics["uploads"] >= 10
 assert torch.webgpu.cpu_fallbacks() == 0
+state = js.globalThis.__torchWebGPU
+assert state.objects.get(1).refs == 1
+assert state.objects.get(2).refs == 1
+
+releases_before = diagnostics["buffer_releases"]
+temporary = torch.empty((32,), device="webgpu")
+temporary_id = torch.ops.webgpu.buffer_id(temporary)
+assert js.globalThis.__torchWebGPU.buffers.has(temporary_id)
+del temporary
+gc.collect()
+assert not js.globalThis.__torchWebGPU.buffers.has(temporary_id)
+assert torch.webgpu.diagnostics()["buffer_releases"] > releases_before
 
 grad_input = x.detach().requires_grad_(True)
 try:
@@ -141,6 +191,13 @@ except RuntimeError as error:
 else:
     raise AssertionError("synchronous WebGPU readback unexpectedly succeeded")
 
+try:
+    torch.argmax(x)
+except (NotImplementedError, RuntimeError) as error:
+    assert "argmax" in str(error)
+else:
+    raise AssertionError("CPU-fallback argmax unexpectedly ran on WebGPU")
+
 {
     "added": added_cpu.tolist(),
     "multiplied": multiplied_cpu.tolist(),
@@ -149,12 +206,20 @@ else:
     "strided_doubled": strided_doubled_cpu.tolist(),
     "transposed_doubled": transposed_doubled_cpu.tolist(),
     "cloned": cloned_cpu.tolist(),
+    "relu": relu_cpu.tolist(),
+    "mm": mm_cpu.tolist(),
+    "softmax": softmax_cpu.tolist(),
     "kernel_submissions": torch.webgpu.kernel_submissions(),
     "copy_submissions": torch.webgpu.copy_submissions(),
     "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
+    "diagnostics": torch.webgpu.diagnostics(),
 }
     `);
     await device.queue.onSubmittedWorkDone();
+    const scopedValidationError = await device.popErrorScope();
+    if (scopedValidationError !== null) {
+      throw new Error(`WebGPU validation error: ${scopedValidationError.message}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (window.webgpuTest.validationErrors.length !== 0) {
       throw new Error(
