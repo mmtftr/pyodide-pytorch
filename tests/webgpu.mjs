@@ -146,10 +146,12 @@ try {
       "--no-sandbox",
       "--enable-unsafe-webgpu",
       "--enable-unsafe-swiftshader",
-      "--enable-features=Vulkan,WebGPU",
-      "--use-angle=swiftshader",
-      "--use-vulkan=swiftshader",
-      "--disable-vulkan-surface",
+      "--use-webgpu-adapter=swiftshader",
+      "--enable-dawn-features=allow_unsafe_apis",
+      "--disable-dawn-features=use_dxc",
+      "--enable-webgpu-developer-features",
+      "--use-gpu-in-tests",
+      "--enable-accelerated-2d-canvas",
     ],
   });
   const page = await browser.newPage();

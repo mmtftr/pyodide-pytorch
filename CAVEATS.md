@@ -41,9 +41,13 @@ experimental `PrivateUse1` backend named `webgpu`. It submits real WGSL
 compute work through the browser WebGPU API, but it is not a general PyTorch
 accelerator backend.
 
-The tested surface is currently limited to one device, `torch.float32`,
-CPU-to-GPU and GPU-to-GPU copies, addition, multiplication, broadcasting, and
-metadata-only views, plus explicit asynchronous readback. Unsupported
+Release `r4` is limited to one device, `torch.float32`, CPU-to-GPU and
+GPU-to-GPU copies, addition, multiplication, broadcasting, metadata-only
+views, and explicit asynchronous readback. The current development wheel also
+browser-verifies ReLU, 2-D matrix multiplication, and contiguous last-dimension
+softmax through the pinned torch-webgpu WGSL implementations. Other imported
+entry points remain compile-only until individually exercised. Consult the
+[operator support table](docs/webgpu-operator-support.md). Unsupported
 operators raise errors; there is no implicit CPU fallback.
 
 Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. Stock
@@ -57,15 +61,18 @@ The WebGPU backend:
 - requires a browser with WebGPU enabled and a secure context outside
   localhost;
 - is separate from CUDA, so `torch.cuda.is_available()` remains false;
-- does not support autograd, modules, optimizers, reductions, matrix
-  multiplication, or model inference beyond the explicitly registered
-  operators;
+- does not support autograd, modules, optimizers, general reductions, or model
+  inference beyond explicitly registered and browser-verified operators;
 - uses 32-bit shape, stride, and storage-offset metadata and supports at most
   eight dimensions;
 - rejects copies between different views of the same `GPUBuffer`; exact-alias
   copies are no-ops and copies between distinct buffers are supported;
 - has only been validated with the repository's deterministic SwiftShader
   browser test so far.
+
+The side-module/Dawn compatibility design, JavaScript packaging, object
+lifetimes, memory-growth rules, and fragile dependencies are documented in
+[`docs/webgpu-browser-architecture.md`](docs/webgpu-browser-architecture.md).
 
 ## Performance and memory
 

@@ -3,6 +3,15 @@ repository = "https://github.com/pytorch/pytorch.git"
 ref = "cf30153c4c131c8164ee7798e5022d810682e2cb"
 version = "2.13.0+pyodide314.0.2.r4"
 
+[torch_webgpu]
+repository = "https://github.com/jmaczan/torch-webgpu.git"
+ref = "a4369ff0f61f4e58cbffb048cee85047b33dacba"
+
+[emdawnwebgpu]
+release = "v20251002.162335"
+dawn_ref = "01940842b667a7812d0e4ca0ef4367fbec294241"
+archive_sha512 = "ed15672c2c495a77c764929e6979f4e155bf8b9c46dee5b0f234f3208a708bc2b846d89eef345b725d03454b56d549531f48fc84ff2afe7627d14115893b0fb0"
+
 [pyodide]
 version = "314.0.2"
 build_version = "0.36.0"

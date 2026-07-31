@@ -6,6 +6,8 @@ current release uses the following tuple:
 | Component | Pin |
 | --- | --- |
 | PyTorch source | `cf30153c4c131c8164ee7798e5022d810682e2cb` (`2.13.0`) |
+| torch-webgpu source | `a4369ff0f61f4e58cbffb048cee85047b33dacba` |
+| Emdawnwebgpu | `v20251002.162335` / Dawn `01940842b667a7812d0e4ca0ef4367fbec294241` |
 | Wheel version | `2.13.0+pyodide314.0.2.r4` |
 | Pyodide | `314.0.2` |
 | `pyodide-build` | `0.36.0` |
@@ -29,6 +31,10 @@ The `pyemscripten` platform tag is the compatibility boundary. Matching the
 raw Emscripten version alone does not establish compatibility because Pyodide
 versions can differ in CPython, linked side modules, compiler flags, and
 platform ABI.
+
+The Dawn-style C++ interface is also pinned to the Emdawnwebgpu package shipped
+with Emscripten 5.0.3. Unlike `webgpu.h`, `webgpu_cpp.h` is not ABI-stable and
+must not be substituted independently.
 
 A wheel must be rebuilt and retested when any ABI-relevant member of the tuple
 changes. It must not be renamed or loaded into a different native or
