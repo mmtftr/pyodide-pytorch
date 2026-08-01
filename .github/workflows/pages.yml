@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -29,13 +30,14 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
       pages: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel' && github.event.workflow_run.head_sha || 'main' }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -52,14 +54,28 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
-      - name: Assemble verified playground
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - name: Assemble playground shell
         run: |
           mkdir -p public/runtime
           cp site/index.html site/styles.css site/worker.js site/service-worker.js public/
           cp site/dist/app.js site/dist/app.js.map public/
+
+      - name: Download verified main-build artifact
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: torch-*-pyodide-*
+          path: public/runtime
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download verified release artifact
+        if: github.event_name != 'workflow_run' || github.event.workflow_run.name != 'Build PyTorch wheel'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
           release_args=()
           if [[ -n "$RELEASE_TAG" ]]; then
             release_args+=("$RELEASE_TAG")
@@ -70,9 +86,19 @@ jobs:
             --pattern "*.whl" \
             --pattern "*.whl.sha256" \
             --dir public/runtime
-          builder_commit="$(
-            python3 -c 'import json; print(json.load(open("public/runtime/build-manifest.json"))["builder_repository_commit"])'
-          )"
+
+      - name: Verify playground wheel
+        env:
+          BUILD_WORKFLOW_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          FROM_BUILD_WORKFLOW: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel' }}
+        run: |
+          if [[ "$FROM_BUILD_WORKFLOW" == "true" ]]; then
+            builder_commit="$BUILD_WORKFLOW_COMMIT"
+          else
+            builder_commit="$(
+              python3 -c 'import json; print(json.load(open("public/runtime/build-manifest.json"))["builder_repository_commit"])'
+            )"
+          fi
           python3 scripts/verify_release_artifact.py \
             public/runtime \
             --builder-commit "$builder_commit"

@@ -172,6 +172,18 @@ class ToolTests(unittest.TestCase):
                     / "webgpu_cpp.h"
                 ).is_file()
             )
+            project_kernels = (
+                pytorch
+                / "third_party"
+                / "pyodide-pytorch-webgpu"
+                / "llm_kernels"
+            )
+            self.assertTrue((project_kernels / "attention.cpp").is_file())
+            embedded = (project_kernels / "embedded_shaders.h").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("inline constexpr char kSdpa[]", embedded)
+            self.assertIn("inline constexpr char kLayerNorm[]", embedded)
 
     def test_webgpu_build_keeps_side_module_em_js_exports(self) -> None:
         build_script = (ROOT / "scripts" / "build_wheel.sh").read_text(
@@ -189,6 +201,25 @@ class ToolTests(unittest.TestCase):
             ROOT / "docs" / "webgpu-browser-architecture.md"
         ).read_text(encoding="utf-8")
         self.assertIn("SIDE_MODULE=1", architecture)
+
+    def test_playground_exposes_verified_transformer_benchmark(self) -> None:
+        index = (ROOT / "site" / "index.html").read_text(encoding="utf-8")
+        app = (ROOT / "site" / "app.js").read_text(encoding="utf-8")
+        service_worker = (ROOT / "site" / "service-worker.js").read_text(
+            encoding="utf-8"
+        )
+        pages = (ROOT / ".github" / "workflows" / "pages.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('value="transformerBenchmark"', index)
+        self.assertIn("transformerBenchmark:", app)
+        self.assertIn("F.scaled_dot_product_attention", app)
+        self.assertIn("await torch.webgpu.synchronize()", app)
+        self.assertIn("await torch.webgpu.to_cpu_async(gpu_logits)", app)
+        self.assertIn('const ASSET_VERSION = "5"', app)
+        self.assertIn("shell-v5", service_worker)
+        self.assertIn("actions/download-artifact@v8", pages)
+        self.assertIn("github.event.workflow_run.head_sha", pages)
 
     def test_upstream_manifest_is_pinned_and_auditable(self) -> None:
         manifest = json.loads(

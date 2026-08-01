@@ -13,6 +13,38 @@ import config
 ROOT = Path(__file__).resolve().parents[1]
 
 
+SHADERS = {
+    "bmm.wgsl": "kBmm",
+    "embedding.wgsl": "kEmbedding",
+    "layer_norm.wgsl": "kLayerNorm",
+    "rms_norm.wgsl": "kRmsNorm",
+    "sdpa.wgsl": "kSdpa",
+    "strided_copy.wgsl": "kStridedCopy",
+}
+
+
+def embed_project_shaders(directory: Path) -> None:
+    lines = [
+        "#pragma once",
+        "",
+        "namespace pyodide_pytorch::webgpu::shaders {",
+    ]
+    for filename, symbol in SHADERS.items():
+        shader = (directory / filename).read_text(encoding="utf-8")
+        if ")wgsl\"" in shader:
+            raise SystemExit(f"WGSL raw-string delimiter occurs in {filename}")
+        lines.extend(
+            (
+                "",
+                f"inline constexpr char {symbol}[] = R\"wgsl({shader})wgsl\";",
+            )
+        )
+    lines.extend(("", "} // namespace pyodide_pytorch::webgpu::shaders", ""))
+    (directory / "embedded_shaders.h").write_text(
+        "\n".join(lines), encoding="utf-8"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("pytorch_source", type=Path)
@@ -41,6 +73,8 @@ def main() -> int:
             source / "third_party" / "torch-webgpu",
         ROOT / "vendor" / "emdawnwebgpu":
             source / "third_party" / "emdawnwebgpu",
+        ROOT / "webgpu" / "llm_kernels":
+            source / "third_party" / "pyodide-pytorch-webgpu" / "llm_kernels",
     }
     for source_tree, destination in sources.items():
         if not source_tree.is_dir():
@@ -48,6 +82,11 @@ def main() -> int:
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(source_tree, destination)
+
+    project_kernels = (
+        source / "third_party" / "pyodide-pytorch-webgpu" / "llm_kernels"
+    )
+    embed_project_shaders(project_kernels)
 
     wheel_licenses = source / "torch" / "webgpu" / "licenses"
     wheel_licenses.mkdir(parents=True, exist_ok=True)
@@ -70,6 +109,8 @@ def main() -> int:
     required = [
         source / "third_party" / "torch-webgpu" / "csrc" / "ops" / "binary.cpp",
         source / "third_party" / "torch-webgpu" / "csrc" / "ops" / "unary.cpp",
+        project_kernels / "llm_common.h",
+        project_kernels / "embedded_shaders.h",
         source / "third_party" / "emdawnwebgpu" / "webgpu" / "include" / "webgpu" / "webgpu.h",
         source / "third_party" / "emdawnwebgpu" / "webgpu_cpp" / "include" / "webgpu" / "webgpu_cpp.h",
     ]

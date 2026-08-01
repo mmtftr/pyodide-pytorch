@@ -64,8 +64,11 @@
     const result = await pyodide.runPythonAsync(`
 import torch
 import torch.webgpu
+import torch.nn.functional as F
 import js
 import gc
+import math
+import time
 
 assert torch.webgpu.is_available()
 await torch.webgpu.init(device=js.webgpuTestDevice)
@@ -86,10 +89,14 @@ strided_doubled = strided + strided
 transposed = view_base.view(2, 2).transpose(0, 1)
 transposed_doubled = transposed + transposed
 cloned = added.clone()
+copied = torch.empty_like(x)
+copied.copy_(x)
 relu_result = torch.relu(torch.tensor([-2.0, 0.5, 3.0]).to("webgpu"))
 relu_compile_count = torch.webgpu.shader_compilations()
 relu_again = torch.relu(torch.tensor([-1.0, 2.0]).to("webgpu"))
 assert torch.webgpu.shader_compilations() == relu_compile_count
+silu_input_cpu = torch.tensor([-2.0, -0.25, 0.5, 3.0])
+silu_result = F.silu(silu_input_cpu.to("webgpu"))
 mm_result = torch.mm(
     torch.tensor([[1.0, 2.0], [3.0, 4.0]]).to("webgpu"),
     torch.tensor([[5.0, 6.0], [7.0, 8.0]]).to("webgpu"),
@@ -98,6 +105,146 @@ softmax_result = torch.softmax(
     torch.tensor([[1.0, 2.0, 3.0], [-1.0, 0.0, 1.0]]).to("webgpu"),
     dim=-1,
 )
+
+# Project-owned decoder-inference kernels. Token IDs intentionally use int32:
+# int64 storage is outside this first browser profile.
+token_ids_cpu = torch.tensor([[0, 2, 4], [1, 3, 5]], dtype=torch.int32)
+embedding_weight_cpu = torch.arange(48, dtype=torch.float32).reshape(6, 8) / 10
+token_ids = token_ids_cpu.to("webgpu")
+embedding_weight = embedding_weight_cpu.to("webgpu")
+embedding_result = F.embedding(token_ids, embedding_weight)
+token_ids_roundtrip = await torch.webgpu.to_cpu_async(token_ids)
+
+noncontiguous = torch.arange(12, dtype=torch.float32).reshape(3, 4).to("webgpu").t()
+contiguous_result = noncontiguous.contiguous()
+cat_result = torch.cat((contiguous_result, contiguous_result), dim=1)
+
+bmm_lhs_cpu = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4) / 7
+bmm_rhs_cpu = torch.arange(40, dtype=torch.float32).reshape(2, 4, 5) / 11
+bmm_result = torch.bmm(bmm_lhs_cpu.to("webgpu"), bmm_rhs_cpu.to("webgpu"))
+matmul_result = torch.matmul(
+    bmm_lhs_cpu.to("webgpu"), bmm_rhs_cpu.to("webgpu")
+)
+
+norm_input_cpu = torch.linspace(-2.0, 2.0, 32).reshape(2, 4, 4)
+norm_weight_cpu = torch.linspace(0.5, 1.5, 4)
+norm_bias_cpu = torch.linspace(-0.2, 0.2, 4)
+layer_norm_result = F.layer_norm(
+    norm_input_cpu.to("webgpu"),
+    (4,),
+    norm_weight_cpu.to("webgpu"),
+    norm_bias_cpu.to("webgpu"),
+    1e-5,
+)
+rms_norm_result = F.rms_norm(
+    norm_input_cpu.to("webgpu"),
+    (4,),
+    norm_weight_cpu.to("webgpu"),
+    1e-5,
+)
+
+# Validate GQA and PyTorch's upper-left causal contract for a rectangular
+# query/key score matrix.
+gqa_query_cpu = torch.linspace(-0.5, 0.5, 1 * 4 * 1 * 4).reshape(1, 4, 1, 4)
+gqa_key_cpu = torch.linspace(-0.7, 0.7, 1 * 2 * 5 * 4).reshape(1, 2, 5, 4)
+gqa_value_cpu = torch.linspace(0.8, -0.8, 1 * 2 * 5 * 4).reshape(1, 2, 5, 4)
+gqa_result = F.scaled_dot_product_attention(
+    gqa_query_cpu.to("webgpu"),
+    gqa_key_cpu.to("webgpu"),
+    gqa_value_cpu.to("webgpu"),
+    dropout_p=0.0,
+    is_causal=True,
+    enable_gqa=True,
+)
+masked_query_cpu = torch.linspace(-0.4, 0.4, 1 * 1 * 2 * 4).reshape(1, 1, 2, 4)
+masked_key_cpu = torch.linspace(-0.6, 0.6, 1 * 1 * 3 * 4).reshape(1, 1, 3, 4)
+masked_value_cpu = torch.linspace(0.7, -0.7, 1 * 1 * 3 * 4).reshape(1, 1, 3, 4)
+additive_mask_cpu = torch.tensor([[0.0, -100.0, 0.0], [0.0, 0.0, -100.0]])
+masked_attention_result = F.scaled_dot_product_attention(
+    masked_query_cpu.to("webgpu"),
+    masked_key_cpu.to("webgpu"),
+    masked_value_cpu.to("webgpu"),
+    additive_mask_cpu.to("webgpu"),
+    dropout_p=0.0,
+)
+
+# Rotary position encoding is intentionally composed from genuine GPU ops,
+# including the new cat/strided-copy path, instead of adding model-specific
+# vendor code.
+rope_input_cpu = torch.linspace(-1.0, 1.0, 1 * 2 * 3 * 4).reshape(1, 2, 3, 4)
+rope_cos_cpu = torch.tensor([[[[1.0, 0.9, 1.0, 0.9]]]], dtype=torch.float32)
+rope_sin_cpu = torch.tensor([[[[0.0, 0.1, 0.0, 0.1]]]], dtype=torch.float32)
+rope_input = rope_input_cpu.to("webgpu")
+rope_rotated = torch.cat((-rope_input[..., 2:], rope_input[..., :2]), dim=-1)
+rope_result = rope_input * rope_cos_cpu.to("webgpu") + rope_rotated * rope_sin_cpu.to("webgpu")
+
+# A complete tiny pre-norm GPT decoder block: token/position embedding,
+# QKV/projection linears, fused causal attention, GELU MLP, residuals,
+# normalizations, and logits. This is the executable inference acceptance test,
+# not merely a set of isolated operator checks.
+BATCH, SEQUENCE, WIDTH, HEADS, FF_WIDTH, VOCAB = 1, 8, 16, 4, 32, 24
+HEAD_DIM = WIDTH // HEADS
+decoder_ids_cpu = torch.tensor([[1, 5, 2, 7, 3, 6, 4, 8]], dtype=torch.int32)
+position_ids_cpu = torch.arange(SEQUENCE, dtype=torch.int32).reshape(1, -1)
+
+def deterministic_parameter(shape, scale, shift=0.0):
+    count = math.prod(shape)
+    return ((torch.arange(count, dtype=torch.float32) % 29) - 14).reshape(shape) * scale + shift
+
+decoder_cpu_parameters = {
+    "token": deterministic_parameter((VOCAB, WIDTH), 0.015),
+    "position": deterministic_parameter((SEQUENCE, WIDTH), 0.01),
+    "ln1_weight": deterministic_parameter((WIDTH,), 0.01, 1.0),
+    "ln1_bias": deterministic_parameter((WIDTH,), 0.002),
+    "qkv_weight": deterministic_parameter((3 * WIDTH, WIDTH), 0.003),
+    "qkv_bias": deterministic_parameter((3 * WIDTH,), 0.001),
+    "projection_weight": deterministic_parameter((WIDTH, WIDTH), 0.004),
+    "projection_bias": deterministic_parameter((WIDTH,), 0.001),
+    "ln2_weight": deterministic_parameter((WIDTH,), 0.01, 1.0),
+    "ln2_bias": deterministic_parameter((WIDTH,), 0.002),
+    "up_weight": deterministic_parameter((FF_WIDTH, WIDTH), 0.003),
+    "up_bias": deterministic_parameter((FF_WIDTH,), 0.001),
+    "down_weight": deterministic_parameter((WIDTH, FF_WIDTH), 0.003),
+    "down_bias": deterministic_parameter((WIDTH,), 0.001),
+    "final_weight": deterministic_parameter((VOCAB, WIDTH), 0.004),
+    "final_bias": deterministic_parameter((VOCAB,), 0.001),
+}
+
+def decoder_block(ids, positions, parameters):
+    hidden = F.embedding(ids, parameters["token"]) + F.embedding(positions, parameters["position"])
+    normalized = F.layer_norm(
+        hidden, (WIDTH,), parameters["ln1_weight"], parameters["ln1_bias"], 1e-5
+    )
+    qkv = F.linear(normalized, parameters["qkv_weight"], parameters["qkv_bias"])
+    qkv = qkv.view(BATCH, SEQUENCE, 3, HEADS, HEAD_DIM)
+    query = qkv.select(2, 0).permute(0, 2, 1, 3)
+    key = qkv.select(2, 1).permute(0, 2, 1, 3)
+    value = qkv.select(2, 2).permute(0, 2, 1, 3)
+    attended = F.scaled_dot_product_attention(
+        query, key, value, dropout_p=0.0, is_causal=True
+    )
+    attended = attended.permute(0, 2, 1, 3).contiguous().view(BATCH, SEQUENCE, WIDTH)
+    hidden = hidden + F.linear(
+        attended, parameters["projection_weight"], parameters["projection_bias"]
+    )
+    normalized = F.layer_norm(
+        hidden, (WIDTH,), parameters["ln2_weight"], parameters["ln2_bias"], 1e-5
+    )
+    mlp = F.linear(normalized, parameters["up_weight"], parameters["up_bias"])
+    mlp = F.gelu(mlp)
+    hidden = hidden + F.linear(mlp, parameters["down_weight"], parameters["down_bias"])
+    return F.linear(hidden, parameters["final_weight"], parameters["final_bias"])
+
+with torch.no_grad():
+    decoder_reference = decoder_block(
+        decoder_ids_cpu, position_ids_cpu, decoder_cpu_parameters
+    )
+    decoder_gpu_parameters = {
+        name: value.to("webgpu") for name, value in decoder_cpu_parameters.items()
+    }
+    decoder_ids = decoder_ids_cpu.to("webgpu")
+    decoder_positions = position_ids_cpu.to("webgpu")
+    decoder_logits = decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
 added_cpu = await torch.webgpu.to_cpu_async(added)
 multiplied_cpu = await torch.webgpu.to_cpu_async(multiplied)
 broadcast_cpu = await torch.webgpu.to_cpu_async(broadcast)
@@ -105,10 +252,23 @@ sliced_cpu = await torch.webgpu.to_cpu_async(sliced)
 strided_doubled_cpu = await torch.webgpu.to_cpu_async(strided_doubled)
 transposed_doubled_cpu = await torch.webgpu.to_cpu_async(transposed_doubled)
 cloned_cpu = await torch.webgpu.to_cpu_async(cloned)
+copied_cpu = await torch.webgpu.to_cpu_async(copied)
 relu_cpu = await torch.webgpu.to_cpu_async(relu_result)
 relu_again_cpu = await torch.webgpu.to_cpu_async(relu_again)
+silu_cpu = await torch.webgpu.to_cpu_async(silu_result)
 mm_cpu = await torch.webgpu.to_cpu_async(mm_result)
 softmax_cpu = await torch.webgpu.to_cpu_async(softmax_result)
+embedding_cpu = await torch.webgpu.to_cpu_async(embedding_result)
+contiguous_cpu = await torch.webgpu.to_cpu_async(contiguous_result)
+cat_cpu = await torch.webgpu.to_cpu_async(cat_result)
+bmm_cpu = await torch.webgpu.to_cpu_async(bmm_result)
+matmul_cpu = await torch.webgpu.to_cpu_async(matmul_result)
+layer_norm_cpu = await torch.webgpu.to_cpu_async(layer_norm_result)
+rms_norm_cpu = await torch.webgpu.to_cpu_async(rms_norm_result)
+gqa_cpu = await torch.webgpu.to_cpu_async(gqa_result)
+masked_attention_cpu = await torch.webgpu.to_cpu_async(masked_attention_result)
+rope_cpu = await torch.webgpu.to_cpu_async(rope_result)
+decoder_logits_cpu = await torch.webgpu.to_cpu_async(decoder_logits)
 
 assert isinstance(added, torch.Tensor)
 assert added.device.type == "webgpu"
@@ -140,8 +300,10 @@ torch.testing.assert_close(
     torch.tensor([[2.0, 6.0], [4.0, 8.0]]),
 )
 torch.testing.assert_close(cloned_cpu, added_cpu)
+torch.testing.assert_close(copied_cpu, torch.tensor([1.0, 2.0, 3.0]))
 torch.testing.assert_close(relu_cpu, torch.tensor([0.0, 0.5, 3.0]))
 torch.testing.assert_close(relu_again_cpu, torch.tensor([0.0, 2.0]))
+torch.testing.assert_close(silu_cpu, F.silu(silu_input_cpu), rtol=2e-5, atol=2e-6)
 torch.testing.assert_close(
     mm_cpu,
     torch.tensor([[19.0, 22.0], [43.0, 50.0]]),
@@ -154,14 +316,96 @@ torch.testing.assert_close(
     rtol=2e-5,
     atol=2e-6,
 )
+torch.testing.assert_close(token_ids_roundtrip, token_ids_cpu)
+torch.testing.assert_close(embedding_cpu, F.embedding(token_ids_cpu, embedding_weight_cpu))
+torch.testing.assert_close(contiguous_cpu, torch.arange(12, dtype=torch.float32).reshape(3, 4).t())
+torch.testing.assert_close(
+    cat_cpu,
+    torch.cat((torch.arange(12, dtype=torch.float32).reshape(3, 4).t(),) * 2, dim=1),
+)
+torch.testing.assert_close(bmm_cpu, torch.bmm(bmm_lhs_cpu, bmm_rhs_cpu), rtol=2e-5, atol=2e-6)
+torch.testing.assert_close(
+    matmul_cpu, torch.matmul(bmm_lhs_cpu, bmm_rhs_cpu), rtol=2e-5, atol=2e-6
+)
+torch.testing.assert_close(
+    layer_norm_cpu,
+    F.layer_norm(norm_input_cpu, (4,), norm_weight_cpu, norm_bias_cpu, 1e-5),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    rms_norm_cpu,
+    F.rms_norm(norm_input_cpu, (4,), norm_weight_cpu, 1e-5),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    gqa_cpu,
+    F.scaled_dot_product_attention(
+        gqa_query_cpu,
+        gqa_key_cpu,
+        gqa_value_cpu,
+        dropout_p=0.0,
+        is_causal=True,
+        enable_gqa=True,
+    ),
+    rtol=5e-5,
+    atol=5e-6,
+)
+torch.testing.assert_close(
+    masked_attention_cpu,
+    F.scaled_dot_product_attention(
+        masked_query_cpu,
+        masked_key_cpu,
+        masked_value_cpu,
+        additive_mask_cpu,
+        dropout_p=0.0,
+    ),
+    rtol=5e-5,
+    atol=5e-6,
+)
+rope_reference = rope_input_cpu * rope_cos_cpu + torch.cat(
+    (-rope_input_cpu[..., 2:], rope_input_cpu[..., :2]), dim=-1
+) * rope_sin_cpu
+torch.testing.assert_close(rope_cpu, rope_reference, rtol=2e-5, atol=2e-6)
+torch.testing.assert_close(
+    decoder_logits_cpu, decoder_reference, rtol=2e-4, atol=2e-5
+)
+
+# Timing is diagnostic only. CI uses SwiftShader, so these measurements detect
+# pathological regressions but do not represent hardware WebGPU performance.
+PERFORMANCE_REPEATS = 5
+with torch.no_grad():
+    decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+    await torch.webgpu.synchronize()
+    gpu_start = time.perf_counter()
+    for _ in range(PERFORMANCE_REPEATS):
+        decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+    await torch.webgpu.synchronize()
+    gpu_milliseconds = (time.perf_counter() - gpu_start) * 1000 / PERFORMANCE_REPEATS
+
+    cpu_start = time.perf_counter()
+    for _ in range(PERFORMANCE_REPEATS):
+        decoder_block(decoder_ids_cpu, position_ids_cpu, decoder_cpu_parameters)
+    cpu_milliseconds = (time.perf_counter() - cpu_start) * 1000 / PERFORMANCE_REPEATS
+
+llm_performance = {
+    "adapter": dict(js.webgpuTest.adapter.to_py()) if hasattr(js.webgpuTest.adapter, "to_py") else str(js.webgpuTest.adapter),
+    "profile": f"tiny-gpt-b{BATCH}-t{SEQUENCE}-c{WIDTH}-h{HEADS}",
+    "repeats": PERFORMANCE_REPEATS,
+    "gpu_ms_per_forward": gpu_milliseconds,
+    "cpu_ms_per_forward": cpu_milliseconds,
+    "gpu_tokens_per_second": BATCH * SEQUENCE * 1000 / gpu_milliseconds,
+    "software_adapter": True,
+}
 diagnostics = torch.webgpu.diagnostics()
-assert diagnostics["dispatches"] >= 9
+assert diagnostics["dispatches"] >= 100
 assert diagnostics["gpu_copies"] >= 1
 assert diagnostics["shader_compilations"] >= 5
 assert diagnostics["pipeline_creations"] >= 5
 assert diagnostics["command_submissions"] >= diagnostics["dispatches"]
-assert diagnostics["readbacks"] >= 11
-assert diagnostics["uploads"] >= 10
+assert diagnostics["readbacks"] >= 25
+assert diagnostics["uploads"] >= 50
 assert torch.webgpu.cpu_fallbacks() == 0
 state = js.globalThis.__torchWebGPU
 assert state.objects.get(1).refs == 1
@@ -206,9 +450,18 @@ else:
     "strided_doubled": strided_doubled_cpu.tolist(),
     "transposed_doubled": transposed_doubled_cpu.tolist(),
     "cloned": cloned_cpu.tolist(),
+    "copied": copied_cpu.tolist(),
     "relu": relu_cpu.tolist(),
+    "silu": silu_cpu.tolist(),
     "mm": mm_cpu.tolist(),
     "softmax": softmax_cpu.tolist(),
+    "embedding": embedding_cpu.tolist(),
+    "bmm": bmm_cpu.tolist(),
+    "matmul": matmul_cpu.tolist(),
+    "gqa": gqa_cpu.tolist(),
+    "masked_attention": masked_attention_cpu.tolist(),
+    "decoder_logits_checksum": decoder_logits_cpu.sum().item(),
+    "llm_performance": llm_performance,
     "kernel_submissions": torch.webgpu.kernel_submissions(),
     "copy_submissions": torch.webgpu.copy_submissions(),
     "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
