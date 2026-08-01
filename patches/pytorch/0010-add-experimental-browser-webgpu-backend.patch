@@ -1,20 +1,20 @@
-From c992af7a797d31f67c6ed52b03764da84ccd7a11 Mon Sep 17 00:00:00 2001
+From 1237fe5a9af7818a85bb86a1f54fa9e5b3676c25 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Fri, 31 Jul 2026 16:26:13 +0400
 Subject: [PATCH 10/10] Add browser torch-webgpu eager kernel profile
 
 ---
  setup.py                                      |   1 +
- torch/CMakeLists.txt                          |  21 +
+ torch/CMakeLists.txt                          |  27 +
  torch/__init__.py                             |   3 +
  torch/csrc/webgpu/browser_ops.cpp             | 541 ++++++++++++++
  .../webgpu/compat/core/webgpu_allocator.h     |  21 +
  .../csrc/webgpu/compat/core/webgpu_context.h  |  21 +
  torch/csrc/webgpu/emdawnwebgpu_bridge.cpp     | 684 ++++++++++++++++++
- torch/csrc/webgpu/webgpu_backend.cpp          | 380 ++++++++++
+ torch/csrc/webgpu/webgpu_backend.cpp          | 388 ++++++++++
  torch/csrc/webgpu/webgpu_context.cpp          |  44 ++
- torch/webgpu/__init__.py                      | 292 ++++++++
- 10 files changed, 2008 insertions(+)
+ torch/webgpu/__init__.py                      | 295 ++++++++
+ 10 files changed, 2025 insertions(+)
  create mode 100644 torch/csrc/webgpu/browser_ops.cpp
  create mode 100644 torch/csrc/webgpu/compat/core/webgpu_allocator.h
  create mode 100644 torch/csrc/webgpu/compat/core/webgpu_context.h
@@ -36,10 +36,10 @@ index 14d9fa3..21e2cd1 100644
  
      if not BUILD_LIBTORCH_WHL:
 diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
-index 4587c64..99537ce 100644
+index 4587c64..36f6988 100644
 --- a/torch/CMakeLists.txt
 +++ b/torch/CMakeLists.txt
-@@ -39,6 +39,18 @@ set(TORCH_PYTHON_SRCS
+@@ -39,6 +39,23 @@ set(TORCH_PYTHON_SRCS
      ${GENERATED_CXX_PYTHON}
      )
  append_filelist("libtorch_python_core_sources" TORCH_PYTHON_SRCS)
@@ -53,12 +53,17 @@ index 4587c64..99537ce 100644
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/unary.cpp
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/activation_functions.cpp
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/trig.cpp
-+    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/scalar_unary.cpp)
++    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/scalar_unary.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/copy.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/embedding.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/matmul.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/normalization.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/attention.cpp)
 +endif()
  
  # NB: This has to match the condition under which the JIT test directory
  #     is included (at the time of writing that's in caffe2/CMakeLists.txt).
-@@ -76,6 +88,15 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
+@@ -76,6 +93,16 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
      ${TORCH_SRC_DIR}/standalone
      )
  
@@ -67,6 +72,7 @@ index 4587c64..99537ce 100644
 +    ${TORCH_SRC_DIR}/csrc/webgpu/compat
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels
 +    ${TORCH_ROOT}/third_party/emdawnwebgpu/webgpu/include
 +    ${TORCH_ROOT}/third_party/emdawnwebgpu/webgpu_cpp/include)
 +endif()
@@ -1381,10 +1387,10 @@ index 0000000..d0eda48
 +} // extern "C"
 diff --git a/torch/csrc/webgpu/webgpu_backend.cpp b/torch/csrc/webgpu/webgpu_backend.cpp
 new file mode 100644
-index 0000000..00d1a8e
+index 0000000..6be9b97
 --- /dev/null
 +++ b/torch/csrc/webgpu/webgpu_backend.cpp
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,388 @@
 +// Browser storage, device plumbing, copies, and metadata operators for the
 +// torch-webgpu eager-kernel port. Compute dispatch itself uses the pinned
 +// Emdawnwebgpu Dawn-style headers through emdawnwebgpu_bridge.cpp.
@@ -1503,9 +1509,9 @@ index 0000000..00d1a8e
 +  TORCH_CHECK(
 +      tensor.device().is_privateuseone(), operation, " expected a WebGPU tensor");
 +  TORCH_CHECK(
-+      tensor.scalar_type() == at::kFloat,
++      tensor.scalar_type() == at::kFloat || tensor.scalar_type() == at::kInt,
 +      operation,
-+      " supports only torch.float32");
++      " supports only torch.float32 and torch.int32");
 +  TORCH_CHECK(
 +      !require_contiguous || tensor.is_contiguous(),
 +      operation,
@@ -1564,7 +1570,8 @@ index 0000000..00d1a8e
 +    std::optional<c10::MemoryFormat> memory_format) {
 +  const auto resolved_dtype = c10::dtype_or_default(dtype);
 +  TORCH_CHECK(
-+      resolved_dtype == at::kFloat, "WebGPU supports only torch.float32");
++      resolved_dtype == at::kFloat || resolved_dtype == at::kInt,
++      "WebGPU supports only torch.float32 and torch.int32");
 +  TORCH_CHECK(
 +      c10::layout_or_default(layout) == c10::Layout::Strided,
 +      "WebGPU supports only strided tensors");
@@ -1590,7 +1597,8 @@ index 0000000..00d1a8e
 +    std::optional<bool> pin_memory) {
 +  const auto resolved_dtype = c10::dtype_or_default(dtype);
 +  TORCH_CHECK(
-+      resolved_dtype == at::kFloat, "WebGPU supports only torch.float32");
++      resolved_dtype == at::kFloat || resolved_dtype == at::kInt,
++      "WebGPU supports only torch.float32 and torch.int32");
 +  TORCH_CHECK(
 +      c10::layout_or_default(layout) == c10::Layout::Strided,
 +      "WebGPU supports only strided tensors");
@@ -1632,8 +1640,11 @@ index 0000000..00d1a8e
 +  if (source.device().is_cpu() && destination.device().is_privateuseone()) {
 +    check_supported_tensor(destination, "CPU to WebGPU copy");
 +    TORCH_CHECK(
-+        source.scalar_type() == at::kFloat,
-+        "CPU to WebGPU copy supports only torch.float32");
++        source.scalar_type() == destination.scalar_type(),
++        "CPU to WebGPU copy requires matching dtypes");
++    TORCH_CHECK(
++        source.scalar_type() == at::kFloat || source.scalar_type() == at::kInt,
++        "CPU to WebGPU copy supports only torch.float32 and torch.int32");
 +    TORCH_CHECK(source.sizes() == destination.sizes(), "copy shape mismatch");
 +    const auto contiguous_source =
 +        source.is_contiguous() ? source : source.contiguous();
@@ -1661,6 +1672,9 @@ index 0000000..00d1a8e
 +      destination.device().is_privateuseone()) {
 +    check_supported_tensor(source, "WebGPU copy");
 +    check_supported_tensor(destination, "WebGPU copy");
++    TORCH_CHECK(
++        source.scalar_type() == destination.scalar_type(),
++        "WebGPU copy requires matching dtypes");
 +    TORCH_CHECK(source.sizes() == destination.sizes(), "copy shape mismatch");
 +    const auto nbytes = checked_nbytes(source);
 +    if (nbytes == 0) {
@@ -1817,10 +1831,10 @@ index 0000000..23bdf1a
 +} // namespace torch_webgpu::core
 diff --git a/torch/webgpu/__init__.py b/torch/webgpu/__init__.py
 new file mode 100644
-index 0000000..29befd1
+index 0000000..dc774e8
 --- /dev/null
 +++ b/torch/webgpu/__init__.py
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,295 @@
 +"""Experimental browser WebGPU backend for the Pyodide PyTorch build.
 +
 +GPU storage and ATen dispatch are implemented in C++ using PyTorch's
@@ -1940,14 +1954,16 @@ index 0000000..29befd1
 +
 +
 +async def to_cpu_async(tensor: torch.Tensor) -> torch.Tensor:
-+    """Read a contiguous float32 WebGPU tensor into CPU memory."""
++    """Read a contiguous float32 or int32 WebGPU tensor into CPU memory."""
 +
 +    import numpy as np
 +
 +    if tensor.device.type != "webgpu":
 +        raise TypeError(f"expected a WebGPU tensor, got {tensor.device}")
-+    if tensor.dtype is not torch.float32:
-+        raise NotImplementedError("WebGPU readback supports only torch.float32")
++    if tensor.dtype not in (torch.float32, torch.int32):
++        raise NotImplementedError(
++            "WebGPU readback supports only torch.float32 and torch.int32"
++        )
 +    if not tensor.is_contiguous():
 +        raise NotImplementedError("WebGPU readback requires a contiguous tensor")
 +    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
@@ -1981,8 +1997,9 @@ index 0000000..29befd1
 +    try:
 +        mapped = readback.getMappedRange(0, allocated_nbytes)
 +        byte_view = _js().Uint8Array.new(mapped)
++        numpy_dtype = np.float32 if tensor.dtype is torch.float32 else np.int32
 +        array = np.frombuffer(
-+            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
++            byte_view.to_py(), dtype=numpy_dtype, count=tensor.numel()
 +        ).copy()
 +    finally:
 +        readback.unmap()
@@ -2113,3 +2130,6 @@ index 0000000..29befd1
 +    "synchronize",
 +    "to_cpu_async",
 +]
+-- 
+2.51.1
+

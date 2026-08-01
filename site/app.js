@@ -8,7 +8,7 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const ASSET_VERSION = "4";
+const ASSET_VERSION = "5";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
@@ -88,6 +88,133 @@ print(matrix)
 print("eigenvalues:", eigenvalues.tolist())
 print("inverse check:")
 print((matrix @ inverse).round(decimals=5))
+`,
+  },
+  transformerBenchmark: {
+    filename: "transformer_webgpu.py",
+    code: `import time
+import torch
+import torch.nn.functional as F
+
+if not torch.webgpu.is_available():
+    raise RuntimeError("WebGPU is not available in this browser")
+
+await torch.webgpu.init()
+
+# A deterministic pre-norm decoder block. The shapes are intentionally small
+# enough for an interactive browser check, but the data flow is real:
+# embeddings -> QKV -> causal attention -> MLP -> logits.
+BATCH, TOKENS, WIDTH, HEADS, FF_WIDTH, VOCAB = 1, 8, 16, 4, 32, 24
+HEAD_DIM = WIDTH // HEADS
+GPU_REPEATS = 5
+CPU_REPEATS = 5
+
+token_ids = torch.tensor([[1, 5, 2, 7, 3, 6, 4, 8]], dtype=torch.int32)
+position_ids = torch.arange(TOKENS, dtype=torch.int32).reshape(1, -1)
+
+def parameter(shape, scale, shift=0.0):
+    count = 1
+    for dimension in shape:
+        count *= dimension
+    values = (torch.arange(count, dtype=torch.float32) % 29) - 14
+    return values.reshape(shape) * scale + shift
+
+cpu_parameters = {
+    "token": parameter((VOCAB, WIDTH), 0.015),
+    "position": parameter((TOKENS, WIDTH), 0.01),
+    "ln1_weight": parameter((WIDTH,), 0.01, 1.0),
+    "ln1_bias": parameter((WIDTH,), 0.002),
+    "qkv_weight": parameter((3 * WIDTH, WIDTH), 0.003),
+    "qkv_bias": parameter((3 * WIDTH,), 0.001),
+    "projection_weight": parameter((WIDTH, WIDTH), 0.004),
+    "projection_bias": parameter((WIDTH,), 0.001),
+    "ln2_weight": parameter((WIDTH,), 0.01, 1.0),
+    "ln2_bias": parameter((WIDTH,), 0.002),
+    "up_weight": parameter((FF_WIDTH, WIDTH), 0.003),
+    "up_bias": parameter((FF_WIDTH,), 0.001),
+    "down_weight": parameter((WIDTH, FF_WIDTH), 0.003),
+    "down_bias": parameter((WIDTH,), 0.001),
+    "final_weight": parameter((VOCAB, WIDTH), 0.004),
+    "final_bias": parameter((VOCAB,), 0.001),
+}
+
+def decoder(ids, positions, weights):
+    hidden = F.embedding(ids, weights["token"])
+    hidden = hidden + F.embedding(positions, weights["position"])
+    normalized = F.layer_norm(
+        hidden, (WIDTH,), weights["ln1_weight"], weights["ln1_bias"], 1e-5
+    )
+    qkv = F.linear(normalized, weights["qkv_weight"], weights["qkv_bias"])
+    qkv = qkv.view(BATCH, TOKENS, 3, HEADS, HEAD_DIM)
+    query = qkv.select(2, 0).permute(0, 2, 1, 3)
+    key = qkv.select(2, 1).permute(0, 2, 1, 3)
+    value = qkv.select(2, 2).permute(0, 2, 1, 3)
+    attended = F.scaled_dot_product_attention(
+        query, key, value, dropout_p=0.0, is_causal=True
+    )
+    attended = attended.permute(0, 2, 1, 3).contiguous()
+    attended = attended.view(BATCH, TOKENS, WIDTH)
+    hidden = hidden + F.linear(
+        attended, weights["projection_weight"], weights["projection_bias"]
+    )
+    normalized = F.layer_norm(
+        hidden, (WIDTH,), weights["ln2_weight"], weights["ln2_bias"], 1e-5
+    )
+    mlp = F.gelu(F.linear(normalized, weights["up_weight"], weights["up_bias"]))
+    hidden = hidden + F.linear(
+        mlp, weights["down_weight"], weights["down_bias"]
+    )
+    return F.linear(hidden, weights["final_weight"], weights["final_bias"])
+
+with torch.no_grad():
+    cpu_logits = decoder(token_ids, position_ids, cpu_parameters)
+    gpu_parameters = {
+        name: value.to("webgpu") for name, value in cpu_parameters.items()
+    }
+    gpu_token_ids = token_ids.to("webgpu")
+    gpu_position_ids = position_ids.to("webgpu")
+
+    diagnostics_before = torch.webgpu.diagnostics()
+    fallbacks_before = torch.webgpu.cpu_fallbacks()
+
+    # Warm-up compiles and caches pipelines. It is excluded from timed work.
+    gpu_logits = decoder(gpu_token_ids, gpu_position_ids, gpu_parameters)
+    await torch.webgpu.synchronize()
+
+    started = time.perf_counter()
+    for _ in range(GPU_REPEATS):
+        gpu_logits = decoder(gpu_token_ids, gpu_position_ids, gpu_parameters)
+    await torch.webgpu.synchronize()
+    gpu_ms = (time.perf_counter() - started) * 1_000 / GPU_REPEATS
+
+    started = time.perf_counter()
+    for _ in range(CPU_REPEATS):
+        cpu_logits = decoder(token_ids, position_ids, cpu_parameters)
+    cpu_ms = (time.perf_counter() - started) * 1_000 / CPU_REPEATS
+
+    readback_started = time.perf_counter()
+    result = await torch.webgpu.to_cpu_async(gpu_logits)
+    readback_ms = (time.perf_counter() - readback_started) * 1_000
+
+torch.testing.assert_close(result, cpu_logits, rtol=2e-4, atol=2e-5)
+diagnostics_after = torch.webgpu.diagnostics()
+fallbacks_after = torch.webgpu.cpu_fallbacks()
+assert fallbacks_after == fallbacks_before, "transformer used a CPU fallback"
+
+dispatches = diagnostics_after["dispatches"] - diagnostics_before["dispatches"]
+submissions = (
+    diagnostics_after["command_submissions"]
+    - diagnostics_before["command_submissions"]
+)
+
+print(f"profile: tiny-gpt-b{BATCH}-t{TOKENS}-c{WIDTH}-h{HEADS}")
+print(f"correctness: CPU and WebGPU logits match · checksum={result.sum().item():.6f}")
+print(f"WebGPU: {gpu_ms:.2f} ms/forward · {BATCH * TOKENS * 1_000 / gpu_ms:.1f} tokens/s")
+print(f"CPU:    {cpu_ms:.2f} ms/forward")
+print(f"GPU/CPU time ratio: {gpu_ms / cpu_ms:.2f}x")
+print(f"final asynchronous readback: {readback_ms:.2f} ms")
+print(f"dispatches: {dispatches} · submissions: {submissions} · new CPU fallbacks: 0")
+print("Note: software WebGPU adapters are regression tools, not hardware benchmarks.")
 `,
   },
   webgpuBenchmark: {

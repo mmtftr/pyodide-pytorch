@@ -140,8 +140,13 @@ have already been prepared.
 Before CMake configuration, the build script runs
 [`scripts/stage_webgpu_sources.py`](../scripts/stage_webgpu_sources.py). It
 copies the checked-in, pinned torch-webgpu and Emdawnwebgpu snapshots into the
-PyTorch `third_party` directory. This step performs no network access. Vendor
-tree hashes and the staging-script hash are included in the release manifest.
+PyTorch `third_party` directory. It also copies project-owned decoder kernels
+from `webgpu/llm_kernels` and generates their embedded-WGSL header. This step
+performs no network access and keeps new kernels separate from vendor code.
+Vendor tree hashes, project WebGPU sources, and the staging-script hash are
+included in the build cache inputs. The release manifest also records a tree
+hash for the project-owned WebGPU directory so artifact verification is bound
+to the exact C++ and WGSL inputs.
 
 ## Build cache
 
@@ -179,10 +184,14 @@ Each GitHub release contains:
 The release workflow revalidates downloaded artifacts before publication and
 does not overwrite an existing release.
 
-The Pages workflow downloads the current release, verifies it with
-[`scripts/verify_release_artifact.py`](../scripts/verify_release_artifact.py),
-and deploys the wheel beside the playground. Browser requests therefore use a
-same-origin wheel URL.
+After a successful `main` build, the Pages workflow downloads that run's
+validated wheel artifact and checks it out against the exact builder commit.
+For release, manual, and standalone site deployments it instead downloads the
+current release. Both paths revalidate the manifest and input hashes with
+[`scripts/verify_release_artifact.py`](../scripts/verify_release_artifact.py)
+before deploying the wheel beside the playground. Browser requests therefore
+use a same-origin wheel URL, and new playground examples cannot get ahead of
+the kernel-bearing wheel that passed the browser gate.
 
 ## Updating versions
 

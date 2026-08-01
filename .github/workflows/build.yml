@@ -10,6 +10,7 @@ on:
       - "config/**"
       - "patches/**"
       - "vendor/**"
+      - "webgpu/**"
       - "scripts/**"
       - "tests/**"
       - ".github/workflows/build.yml"
@@ -133,9 +134,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .ccache
-          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**') }}-
+            ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-
             ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-
             ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-
 
@@ -258,7 +259,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .ccache
-          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune, vendor LAPACK, and validate wheel
         id: wheel

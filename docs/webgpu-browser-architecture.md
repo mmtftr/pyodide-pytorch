@@ -23,12 +23,12 @@ destruction. Repeating the probe with pyodide-build's optimized
 `SIDE_MODULE=2` profile left the internal `twgpu_*` imports unresolved. Changing
 the wheel export mode is therefore an explicit compatibility boundary.
 
-The resulting PyTorch wheel was also loaded by unmodified Pyodide 314.0.2 in
-Chromium. The browser test initialized a real `GPUDevice`, exercised buffer
-lifetime and copies, and numerically verified the imported add, multiply,
-ReLU, 2-D matrix-multiplication, and last-dimension softmax kernels. Diagnostic
-counters recorded nine dispatches and zero CPU fallbacks. This validates the
-whole packaging path, rather than only the standalone loader probe.
+The resulting PyTorch wheel is loaded by unmodified Pyodide 314.0.2 in
+Chromium. The browser test initializes a real `GPUDevice`, exercises buffer
+lifetime and copies, and numerically verifies isolated eager kernels plus a
+complete tiny decoder block. Diagnostic counters and a mandatory zero
+CPU-fallback count validate the whole packaging path rather than only the
+standalone loader probe.
 
 Full Emdawnwebgpu is different. Its `webgpu.cpp` layer calls `emwgpu*` symbols
 implemented by four `library_webgpu*.js` files. Emscripten processes those
@@ -82,6 +82,10 @@ coroutine `torch.webgpu.to_cpu_async`: it copies into a MAP_READ buffer, awaits
 `mapAsync`, copies the mapped bytes, and then unmaps and destroys the temporary
 buffer. Synchronous `.cpu()` and `.item()` fail with a directed error.
 
+Float32 activations and int32 token IDs use the same raw 32-bit buffer path.
+The tensor dtype remains native PyTorch metadata; every operator checks the
+expected dtype before interpreting those bytes.
+
 ## Imported operator policy
 
 The build explicitly lists its upstream source files. It does not use
@@ -100,6 +104,23 @@ pinned reference shader and is restricted to contiguous float32 tensors along
 the last dimension. Unsupported dtypes, mixed CPU/WebGPU inputs, autograd,
 and fallback-dependent operators fail before dispatch.
 
+Decoder kernels that are not present as a complete browser-safe upstream path
+live in the project-owned `webgpu/llm_kernels` directory, never under
+`vendor/`. The staging script copies that directory beside the two pinned
+source trees and generates a C++ header containing its WGSL. The wheel thus
+performs no runtime shader-file reads and no network fetch. The initial set is
+strided copy/concatenation, int32 embedding, batched matrix multiplication,
+LayerNorm, RMSNorm, and fused causal or float-mask SDPA with GQA head mapping.
+Rotary encoding in the browser test is composed from slice, negate,
+concatenation, multiply, and add instead of introducing a model-specific
+kernel.
+
+Pipeline objects are function-local C++ statics. Dawn-style RAII retains their
+numeric handles for the process lifetime and releases temporary bind groups,
+parameter buffers, encoders, and command buffers after submission. WebGPU's
+submission lifetime rules keep referenced browser resources alive until the
+queued work completes.
+
 ## Diagnostics and fragile dependencies
 
 `torch.webgpu.diagnostics()` reports buffer allocations/releases, uploads,
@@ -114,3 +135,21 @@ content-security policy that permits that dynamic evaluation. Both the
 Emscripten version and Emdawn release are pinned because `webgpu_cpp.h` is not
 an ABI-stable interface. A future switch to `--exports=pyinit` or `requested`
 must first solve or reproduce the `SIDE_MODULE=2` unresolved-import behavior.
+
+## Decoder verification snapshot
+
+The pinned development wheel was built with CPython 3.14.2, Emscripten 5.0.3,
+and the stock Pyodide 314.0.2 xbuild environment. Chromium's SwiftShader
+WebGPU adapter completed every numerical comparison in `tests/webgpu.html`,
+including GQA, additive-mask attention, composed rotary encoding, and the
+batch-one, eight-token tiny GPT block. The run recorded 167 compute dispatches,
+one explicit GPU copy, 25 asynchronous readbacks, 14 shader compilations and
+pipeline creations, zero failed dispatches, zero CPU fallbacks, and zero
+WebGPU validation errors.
+
+The five-repeat timing sample was 11.22 ms per decoder forward, or about 713
+tokens/second, versus 0.96 ms for CPU PyTorch in the same browser. These tiny
+shapes are dominated by dispatch overhead and SwiftShader is a software
+adapter, so the values are a regression diagnostic rather than a hardware GPU
+performance claim. Wheel validation, the CPU/Pyodide smoke test, and all 654
+selected upstream CPU tests also passed.

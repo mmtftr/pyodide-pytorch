@@ -38,13 +38,16 @@ CPython wheel.
 ## Try it
 
 The [playground](https://mmtftr.github.io/pyodide-pytorch/) loads the latest
-verified release in a Web Worker and provides:
+fully validated `main` wheel in a Web Worker, falling back to the latest
+verified release when no matching build artifact is being deployed. It
+provides:
 
 - a CodeMirror Python editor and separate output console;
 - autocompletion with `Tab` or `Ctrl+Space`;
 - runtime-derived signatures and documentation on hover;
 - examples for tensors, autograd, neural networks, optimization,
-  `torch.linalg`, and a CPU-versus-WebGPU elementwise benchmark;
+  `torch.linalg`, and CPU-versus-WebGPU elementwise and transformer decoder
+  benchmarks;
 - restart, cancellation, and versioned browser caching.
 
 The first load downloads Pyodide, its Python dependencies, and the PyTorch
@@ -53,7 +56,7 @@ wheel. Compatible subsequent visits reuse the versioned runtime cache.
 ## Use it in a web application
 
 The wheel is not published on PyPI. Load the matching Pyodide runtime and the
-verified wheel deployed with the playground:
+validated wheel deployed with the playground:
 
 ```html
 <script type="module">
@@ -122,10 +125,10 @@ print(result.device)  # webgpu:0
 print(await torch.webgpu.to_cpu_async(result))
 ```
 
-The initial backend is intentionally narrow:
+The backend is intentionally bounded:
 
-- one browser `GPUDevice`, contiguous `torch.float32` storage, and at most
-  eight dimensions;
+- one browser `GPUDevice`, float32 model tensors, int32 token indices, and at
+  most eight dimensions;
 - GPU-native tensor addition and multiplication, including broadcasting,
   storage offsets, and `alpha` for addition;
 - metadata-only `view`, slice, and transpose operations;
@@ -133,6 +136,14 @@ The initial backend is intentionally narrow:
 - explicit asynchronous GPU-to-CPU readback through
   `await torch.webgpu.to_cpu_async(tensor)`;
 - unsupported operations fail instead of silently falling back to the CPU.
+
+Development wheels also include a browser-verified decoder inference slice:
+embedding, strided materialization/concatenation, BMM/linear, LayerNorm,
+RMSNorm, fused causal/GQA attention, and a complete tiny GPT block assembled
+with the existing activation and elementwise WGSL kernels. The separately
+maintained kernels are under `webgpu/llm_kernels`, not the pinned vendor trees.
+This does not yet include KV-cache mutation, sampling, quantization, or reduced
+precision.
 
 Synchronous `.cpu()`, `.item()`, and value-based tensor formatting cannot wait
 for WebGPU buffer mapping in stock single-threaded Pyodide, so they are not
@@ -156,7 +167,7 @@ absent from stock Pyodide. See the
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| Experimental WebGPU (`r4`) | `float32` add/multiply, broadcasting, copies, and async readback |
+| Experimental WebGPU (`r4`; broader on development) | `float32` eager inference subset with explicit async readback; see the operator table |
 | CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |
@@ -178,9 +189,9 @@ series. CI then:
    and LAPACK-backed linear algebra;
 3. runs 654 selected upstream PyTorch CPU tests with zero runtime skips,
    expected failures, failures, or errors;
-4. runs real add, multiply, broadcast, view, copy, and readback operations in
-   Chromium with SwiftShader WebGPU and requires zero validation errors or
-   implicit CPU fallbacks;
+4. runs real eager kernels, copies/readback, composed rotary encoding, and a
+   tiny decoder block in Chromium with SwiftShader WebGPU, requiring zero
+   validation errors or implicit CPU fallbacks;
 5. publishes a SHA-256 digest, a machine-readable build manifest, and a GitHub
    artifact attestation.
 

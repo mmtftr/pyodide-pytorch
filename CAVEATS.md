@@ -50,6 +50,15 @@ entry points remain compile-only until individually exercised. Consult the
 [operator support table](docs/webgpu-operator-support.md). Unsupported
 operators raise errors; there is no implicit CPU fallback.
 
+The current development wheel adds int32 token IDs, embedding, general
+strided materialization and concatenation, batched matrix multiplication and
+linear layers, LayerNorm, RMSNorm, and fused causal attention with grouped
+query heads. Its browser gate executes a small full-sequence GPT decoder block
+and composed rotary encoding. This is an inference kernel profile, not general
+LLM compatibility: KV-cache mutation, sampling, quantization, float16/bfloat16,
+model loading, tokenizer code, and repository-specific custom operators remain
+unsupported.
+
 Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. Stock
 single-threaded Pyodide cannot turn that Promise into a synchronous PyTorch
 copy, so `.cpu()`, `.item()`, and operations that need to inspect values on the
@@ -61,7 +70,7 @@ The WebGPU backend:
 - requires a browser with WebGPU enabled and a secure context outside
   localhost;
 - is separate from CUDA, so `torch.cuda.is_available()` remains false;
-- does not support autograd, modules, optimizers, general reductions, or model
+- does not support WebGPU autograd, optimizers, general reductions, or model
   inference beyond explicitly registered and browser-verified operators;
 - uses 32-bit shape, stride, and storage-offset metadata and supports at most
   eight dimensions;

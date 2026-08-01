@@ -54,6 +54,7 @@ def main() -> int:
             "staging_script_sha256": sha256(
                 ROOT / "scripts" / "stage_webgpu_sources.py"
             ),
+            "project_webgpu_tree_sha256": tree_sha256(ROOT / "webgpu"),
             "vendor_trees": {
                 name: tree_sha256(ROOT / "vendor" / name)
                 for name in ("emdawnwebgpu", "torch-webgpu")
