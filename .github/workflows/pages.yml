@@ -1,23 +1,20 @@
 name: Deploy playground to GitHub Pages
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "site/**"
-      - ".github/workflows/pages.yml"
-  release:
-    types: [published]
   workflow_run:
     workflows:
-      - Build PyTorch wheel
       - Publish verified release artifact
     types: [completed]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact verified release tag to redeploy
+        required: true
+        type: string
 
 concurrency:
   group: github-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   actions: read
@@ -34,10 +31,157 @@ jobs:
       contents: read
       pages: write
     steps:
-      - name: Check out repository
+      - name: Resolve newest complete Publisher run
+        id: publisher
+        env:
+          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs_json="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/publish-release.yml/runs?branch=main&status=success&per_page=100"
+          )"
+          mapfile -t candidates < <(
+            jq -r --arg repository "$GITHUB_REPOSITORY" \
+              '[.workflow_runs[] | select(
+                  (.event == "workflow_run" or .event == "workflow_dispatch") and
+                  .head_branch == "main" and
+                  .head_repository.full_name == $repository and
+                  .conclusion == "success"
+                )] | sort_by(.id) | reverse[] | [.id, .run_attempt] | @tsv' \
+              <<< "$runs_json"
+          )
+          required_steps=(
+            "Verify source workflow run"
+            "Revalidate downloaded artifact"
+            "Verify build artifact attestations"
+            "Retest inside pinned Pyodide"
+            "Reverify latest successful build"
+            "Publish release idempotently"
+            "Upload promoted artifact for Pages"
+          )
+          publisher_run_id=""
+          publisher_run_attempt=""
+          for candidate in "${candidates[@]}"; do
+            read -r candidate_id candidate_attempt <<< "$candidate"
+            jobs_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_id/jobs?filter=latest&per_page=100"
+            )"
+            complete=true
+            for step_name in "${required_steps[@]}"; do
+              conclusion="$(
+                jq -r --arg step "$step_name" \
+                  '[.jobs[] | select(.name == "publish") | .steps[] | select(.name == $step) | .conclusion] | unique | if length == 1 then .[0] else "invalid" end' \
+                  <<< "$jobs_json"
+              )"
+              if [[ "$conclusion" != "success" ]]; then
+                complete=false
+                break
+              fi
+            done
+            if [[ "$complete" == "true" ]]; then
+              publisher_run_id="$candidate_id"
+              publisher_run_attempt="$candidate_attempt"
+              break
+            fi
+          done
+          if [[ -z "$publisher_run_id" ]]; then
+            echo "::error::No successful complete Publisher run was found"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" && \
+                "$AUTOMATIC_RUN_ID" != "$publisher_run_id" ]]; then
+            echo "::error::The triggering Publisher is not the newest successful complete run"
+            exit 1
+          fi
+          echo "run_id=$publisher_run_id" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$publisher_run_attempt" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifact promoted by newest complete Publisher
+        uses: actions/download-artifact@v8
+        with:
+          name: published-${{ steps.publisher.outputs.run_id }}-${{ steps.publisher.outputs.run_attempt }}
+          path: ${{ runner.temp }}/promoted
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.publisher.outputs.run_id }}
+
+      - name: Read promoted build source
+        id: promoted
+        env:
+          PROMOTED_DIR: ${{ runner.temp }}/promoted
+          REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          mapfile -t manifests < <(find "$PROMOTED_DIR" -maxdepth 1 -type f -name build-manifest.json -print)
+          test "${#manifests[@]}" -eq 1
+          builder_commit="$(
+            python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["builder_repository_commit"])' \
+              "${manifests[0]}"
+          )"
+          release_tag="$(
+            python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["configuration"]["release"]["tag"])' \
+              "${manifests[0]}"
+          )"
+          if [[ ! "$builder_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Promoted artifact has an invalid builder commit"
+            exit 1
+          fi
+          if [[ ! "$release_tag" =~ ^torch-[0-9]+\.[0-9]+\.[0-9]+-pyodide-[0-9]+\.[0-9]+\.[0-9]+-r[1-9][0-9]*$ ]]; then
+            echo "::error::Promoted artifact has an invalid release tag"
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && \
+                "$REQUESTED_RELEASE_TAG" != "$release_tag" ]]; then
+            echo "::error::Requested release is not the newest successful complete WebGPU release"
+            exit 1
+          fi
+          echo "builder_commit=$builder_commit" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out promoted build source
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel' && github.event.workflow_run.head_sha || 'main' }}
+          ref: ${{ steps.promoted.outputs.builder_commit }}
+
+      - name: Verify promoted GitHub Release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTED_BUILDER_COMMIT: ${{ steps.promoted.outputs.builder_commit }}
+          PROMOTED_RELEASE_TAG: ${{ steps.promoted.outputs.release_tag }}
+        run: |
+          mapfile -t tag_fields < <(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$PROMOTED_RELEASE_TAG" \
+              --jq '[.object.type, .object.sha] | .[]'
+          )
+          if [[ "${#tag_fields[@]}" -ne 2 || \
+                "${tag_fields[0]}" != "commit" || \
+                "${tag_fields[1]}" != "$PROMOTED_BUILDER_COMMIT" ]]; then
+            echo "::error::Promoted release tag does not point directly to its builder commit"
+            exit 1
+          fi
+          mapfile -t release_fields < <(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PROMOTED_RELEASE_TAG" \
+              --jq '[.tag_name, .draft] | .[]'
+          )
+          if [[ "${#release_fields[@]}" -ne 2 || \
+                "${release_fields[0]}" != "$PROMOTED_RELEASE_TAG" || \
+                "${release_fields[1]}" != "false" ]]; then
+            echo "::error::Promoted tag is not a published release"
+            exit 1
+          fi
+
+      - name: Read and verify release configuration
+        id: config
+        env:
+          PROMOTED_RELEASE_TAG: ${{ steps.promoted.outputs.release_tag }}
+        run: |
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+          python3 scripts/config.py env >> "$GITHUB_ENV"
+          if [[ "$PROMOTED_RELEASE_TAG" != "$(python3 scripts/config.py get RELEASE_TAG)" ]]; then
+            echo "::error::Promoted artifact release identity does not match its source"
+            exit 1
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -51,57 +195,36 @@ jobs:
           npm ci --prefix site
           npm run build --prefix site
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v6
-
-      - name: Assemble playground shell
+      - name: Prepare pinned Transformers browser dependencies
         run: |
-          mkdir -p public/runtime
-          cp site/index.html site/styles.css site/worker.js site/service-worker.js public/
-          cp site/dist/app.js site/dist/app.js.map public/
-
-      - name: Download verified main-build artifact
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel'
-        uses: actions/download-artifact@v8
-        with:
-          pattern: torch-*-pyodide-*
-          path: public/runtime
-          merge-multiple: true
-          github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
-
-      - name: Download verified release artifact
-        if: github.event_name != 'workflow_run' || github.event.workflow_run.name != 'Build PyTorch wheel'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          release_args=()
-          if [[ -n "$RELEASE_TAG" ]]; then
-            release_args+=("$RELEASE_TAG")
-          fi
-          gh release download "${release_args[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "build-manifest.json" \
-            --pattern "*.whl" \
-            --pattern "*.whl.sha256" \
-            --dir public/runtime
+          python3 scripts/prepare_transformers_browser_deps.py \
+            --output-dir pages-transformers-browser
 
       - name: Verify playground wheel
         env:
-          BUILD_WORKFLOW_COMMIT: ${{ github.event.workflow_run.head_sha }}
-          FROM_BUILD_WORKFLOW: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Build PyTorch wheel' }}
+          PROMOTED_BUILDER_COMMIT: ${{ steps.promoted.outputs.builder_commit }}
+          PROMOTED_DIR: ${{ runner.temp }}/promoted
         run: |
-          if [[ "$FROM_BUILD_WORKFLOW" == "true" ]]; then
-            builder_commit="$BUILD_WORKFLOW_COMMIT"
-          else
-            builder_commit="$(
-              python3 -c 'import json; print(json.load(open("public/runtime/build-manifest.json"))["builder_repository_commit"])'
-            )"
-          fi
           python3 scripts/verify_release_artifact.py \
-            public/runtime \
-            --builder-commit "$builder_commit"
+            "$PROMOTED_DIR" \
+            --builder-commit "$PROMOTED_BUILDER_COMMIT"
+
+      - name: Assemble validated playground
+        env:
+          PROMOTED_DIR: ${{ runner.temp }}/promoted
+        run: |
+          python3 scripts/assemble_playground.py \
+            --release-dir "$PROMOTED_DIR" \
+            --transformers-dir pages-transformers-browser \
+            --output-dir public
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Test assembled playground in Chrome
+        run: |
+          npm install --no-save "puppeteer-core@25.4.0"
+          node tests/playground.mjs public "$PYTORCH_VERSION" "$RELEASE_TAG"
 
       - name: Upload playground artifact
         uses: actions/upload-pages-artifact@v5

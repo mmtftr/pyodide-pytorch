@@ -1,0 +1,268 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Transformers architecture CPU operator audit</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const transformersWheel = parameters.get("transformers");
+    const hubWheel = parameters.get("hub");
+    if (!wheel || !filelockWheel || !transformersWheel || !hubWheel) {
+      throw new Error("wheel query parameters are missing");
+    }
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "fsspec",
+      "jinja2",
+      "networkx",
+      "numpy",
+      "pyyaml",
+      "regex",
+      "requests",
+      "safetensors",
+      "sympy",
+      "tqdm",
+      "typing-extensions",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+    await pyodide.loadPackage(`/dependency/${hubWheel}`);
+    await pyodide.loadPackage(`/dependency/${transformersWheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import gc
+import importlib.metadata
+import importlib.util
+import json
+import os
+
+import js
+import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+import transformers
+from transformers.utils import is_tokenizers_available
+
+bootstrap_response = await js.fetch(
+    "/runtime/transformers_browser_bootstrap.py"
+)
+if not bootstrap_response.ok:
+    raise RuntimeError(
+        f"bootstrap request failed: {bootstrap_response.status}"
+    )
+bootstrap_namespace = {}
+exec(await bootstrap_response.text(), bootstrap_namespace)
+assert bootstrap_namespace[
+    "disable_optional_gguf_without_tokenizers"
+]()
+
+fixture_response = await js.fetch("/fixtures/transformers_tiny.json")
+if not fixture_response.ok:
+    raise RuntimeError(f"fixture request failed: {fixture_response.status}")
+fixture = json.loads(await fixture_response.text())
+assert fixture["transformers_version"] == transformers.__version__
+assert importlib.util.find_spec("tokenizers") is None
+assert not is_tokenizers_available()
+
+
+class OpRecorder(TorchDispatchMode):
+    def __init__(self):
+        self.counts = {}
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        del types
+        schema = func._schema
+        name = schema.name
+        if schema.overload_name:
+            name += "." + schema.overload_name
+        self.counts[name] = self.counts.get(name, 0) + 1
+        return func(*args, **(kwargs or {}))
+
+
+def has_webgpu_kernel(name):
+    for query in (
+        "_dispatch_has_computed_kernel_for_dispatch_key",
+        "_dispatch_has_kernel_for_dispatch_key",
+    ):
+        checker = getattr(torch._C, query, None)
+        if checker is None:
+            continue
+        try:
+            return bool(checker(name, "PrivateUse1"))
+        except RuntimeError:
+            continue
+    return None
+
+
+def tensor(values, *, dtype=torch.long):
+    return torch.tensor(values, dtype=dtype)
+
+
+def model_inputs(profile):
+    if profile == "causal_explicit_positions":
+        return {
+            "input_ids": tensor(fixture["input_ids"]),
+            "position_ids": tensor(fixture["position_ids"]),
+            "cache_position": tensor(fixture["cache_position"]),
+            "use_cache": False,
+            "return_dict": True,
+        }
+    if profile == "causal_masked":
+        return {
+            "input_ids": tensor(fixture["input_ids"]),
+            "attention_mask": tensor(fixture["attention_mask"]),
+            "position_ids": tensor(fixture["position_ids"]),
+            "use_cache": False,
+            "return_dict": True,
+        }
+    if profile == "bloom_masked":
+        return {
+            "input_ids": tensor(fixture["input_ids"]),
+            "attention_mask": tensor(fixture["attention_mask"]),
+            "cache_position": tensor(fixture["cache_position"]),
+            "use_cache": False,
+            "return_dict": True,
+        }
+    if profile == "seq2seq_masked":
+        return {
+            "input_ids": tensor(fixture["input_ids"]),
+            "attention_mask": tensor(fixture["attention_mask"]),
+            "decoder_input_ids": tensor(fixture["decoder_input_ids"]),
+            "decoder_attention_mask": tensor(
+                fixture["decoder_attention_mask"]
+            ),
+            "cache_position": tensor(fixture["decoder_cache_position"]),
+            "use_cache": False,
+            "return_dict": True,
+        }
+    raise AssertionError(f"unknown input profile: {profile}")
+
+
+def trace_forward(model, inputs, output_name):
+    recorder = OpRecorder()
+    with torch.no_grad(), recorder:
+        output = getattr(model(**inputs), output_name).detach().clone()
+    return output, dict(sorted(recorder.counts.items()))
+
+
+audit_names = ("gemma2", "phi3", "opt", "bloom", "t5")
+audit_by_name = {
+    spec["name"]: spec
+    for spec in (
+        fixture["models"] + fixture["architecture_audit_models"]
+    )
+    if spec["name"] in audit_names
+}
+assert set(audit_by_name) == set(audit_names), audit_by_name
+
+rows = []
+for index, name in enumerate(audit_names):
+    spec = audit_by_name[name]
+    config_class = getattr(transformers, spec["config_class"])
+    model_class = getattr(transformers, spec["model_class"])
+    config = config_class(**spec["kwargs"])
+    config._attn_implementation = spec["attention_implementation"]
+    torch.manual_seed(fixture["seed"] + 100 + index)
+    model = model_class(config).eval()
+    inputs = model_inputs(spec["input_profile"])
+
+    first, first_counts = trace_forward(model, inputs, spec["output"])
+    second, second_counts = trace_forward(model, inputs, spec["output"])
+    assert first_counts == second_counts, (
+        spec["name"],
+        first_counts,
+        second_counts,
+    )
+    assert sum(first_counts.values()) == spec[
+        "expected_cpu_operator_count"
+    ], (spec["name"], first_counts)
+    assert len(first_counts) == spec[
+        "expected_cpu_distinct_operators"
+    ], (spec["name"], first_counts)
+    missing_required = sorted(
+        set(spec["required_cpu_operators"]) - set(first_counts)
+    )
+    assert not missing_required, (spec["name"], missing_required)
+    torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+    expected_sequence = (
+        len(fixture["decoder_input_ids"][0])
+        if spec["input_profile"] == "seq2seq_masked"
+        else len(fixture["input_ids"][0])
+    )
+    assert list(first.shape) == [1, expected_sequence, 64], (
+        spec["name"],
+        first.shape,
+    )
+
+    kernel_status = {
+        op: has_webgpu_kernel(op)
+        for op in first_counts
+    }
+    rows.append({
+        "name": spec["name"],
+        "model_class": spec["model_class"],
+        "attention_implementation": spec["attention_implementation"],
+        "input_profile": spec["input_profile"],
+        "output_shape": list(first.shape),
+        "operator_count": sum(first_counts.values()),
+        "distinct_operators": len(first_counts),
+        "operator_counts": first_counts,
+        "operators_without_registered_webgpu_kernel": sorted(
+            op for op, supported in kernel_status.items()
+            if supported is False
+        ),
+        "operators_with_unknown_webgpu_kernel_status": sorted(
+            op for op, supported in kernel_status.items()
+            if supported is None
+        ),
+    })
+    del model, inputs, first, second
+    gc.collect()
+
+json.dumps({
+    "schema_version": 1,
+    "transformers_version": transformers.__version__,
+    "torch_version": torch.__version__,
+    "platform": "pyodide-cpu",
+    "tokenizers_available": is_tokenizers_available(),
+    "determinism_check": "two-identical-forwards",
+    "models": rows,
+})
+`);
+    const diagnostics = JSON.parse(result);
+    window.webgpuTest = {
+      done: true,
+      ok: true,
+      message: "Transformers architecture CPU operator audit passed",
+      diagnostics,
+    };
+    status.textContent = JSON.stringify(window.webgpuTest, null, 2);
+    console.log(status.textContent);
+  } catch (error) {
+    const message =
+      error instanceof Error ? `${error.stack ?? error}` : String(error);
+    window.webgpuTest = {
+      done: true,
+      ok: false,
+      message,
+    };
+    status.textContent = message;
+    console.error(message);
+  }
+</script>

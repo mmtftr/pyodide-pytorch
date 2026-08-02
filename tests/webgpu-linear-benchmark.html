@@ -1,0 +1,283 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU linear benchmark</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const extended = parameters.get("extended") === "1";
+    if (!wheel || !filelockWheel || !navigator.gpu) {
+      throw new Error("WebGPU or benchmark wheel parameters are unavailable");
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null) throw new Error("requestAdapter returned null");
+    const subgroupS4Available =
+      adapter.features.has("subgroups") &&
+      adapter.info?.subgroupMinSize === 32 &&
+      adapter.info?.subgroupMaxSize === 32;
+    const maximumWeightBytes = extended
+      ? 4 * 4096 * 11008
+      : 4 * 4096 * 4096;
+    const device = await adapter.requestDevice({
+      requiredFeatures: subgroupS4Available ? ["subgroups"] : [],
+      requiredLimits: {
+        maxBufferSize: maximumWeightBytes,
+        maxStorageBufferBindingSize: maximumWeightBytes,
+      },
+    });
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    window.webgpuTestDevice = device;
+    window.webgpuTest.adapter = {
+      architecture: adapter.info?.architecture ?? "",
+      description: adapter.info?.description ?? "",
+      device: adapter.info?.device ?? "",
+      vendor: adapter.info?.vendor ?? "",
+      subgroupMinSize: adapter.info?.subgroupMinSize ?? null,
+      subgroupMaxSize: adapter.info?.subgroupMaxSize ?? null,
+      subgroupsEnabled: device.features.has("subgroups"),
+      maxBufferSize: device.limits.maxBufferSize,
+      maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+    };
+    window.webgpuTest.subgroupS4Available = subgroupS4Available;
+    window.webgpuTest.extended = extended;
+    report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import json
+import gc
+import statistics
+import time
+
+import js
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.webgpu
+
+assert torch.webgpu.is_available()
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+state = getattr(js.globalThis, "__torchWebGPU")
+subgroup_s4_available = bool(js.webgpuTest.subgroupS4Available)
+variants = ["portable", "s4"] if subgroup_s4_available else ["portable"]
+
+
+def select_variant(variant):
+    # The host still performs its feature and subgroup-size checks. This knob
+    # can disable S4 for the portable baseline, but cannot force it on.
+    state.linearGemvVariant = variant
+
+
+async def to_numpy_async(tensor):
+    # Keep correctness independent of torch.from_numpy: the current Pyodide
+    # 3.14 wheel has a separate NumPy bridge regression after valid readback.
+    torch.webgpu._flush()
+    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
+    source = state.buffers.get(int(torch.ops.webgpu.buffer_id(tensor)))
+    descriptor = js.Object.new()
+    descriptor.label = "linear benchmark readback"
+    descriptor.size = max(4, nbytes)
+    descriptor.usage = 0x0001 | 0x0008
+    readback = state.device.createBuffer(descriptor)
+    encoder = state.device.createCommandEncoder()
+    encoder.copyBufferToBuffer(
+        source, int(tensor.storage_offset()) * tensor.element_size(),
+        readback, 0, max(4, nbytes),
+    )
+    commands = js.Array.new()
+    commands.push(encoder.finish())
+    state.queue.submit(commands)
+    await readback.mapAsync(js.GPUMapMode.READ)
+    try:
+        byte_view = js.Uint8Array.new(
+            readback.getMappedRange(0, max(4, nbytes))
+        )
+        return np.frombuffer(
+            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
+        ).copy().reshape(tuple(tensor.shape))
+    finally:
+        readback.unmap()
+        readback.destroy()
+
+
+async def check_tail_offsets_and_bias():
+    inner, columns = 259, 70
+    input_offset, weight_offset, bias_offset = 5, 7, 3
+    input_storage_cpu = torch.empty(inner + input_offset + 2)
+    weight_storage_cpu = torch.empty(columns * inner + weight_offset + 2)
+    bias_storage_cpu = torch.empty(columns + bias_offset + 2)
+    input_storage_cpu.uniform_(-0.025, 0.025)
+    weight_storage_cpu.uniform_(-0.025, 0.025)
+    bias_storage_cpu.uniform_(-0.01, 0.01)
+    input_cpu = input_storage_cpu[input_offset:input_offset + inner].reshape(1, inner)
+    weight_cpu = weight_storage_cpu[
+        weight_offset:weight_offset + columns * inner
+    ].reshape(columns, inner)
+    bias_cpu = bias_storage_cpu[bias_offset:bias_offset + columns]
+    expected = F.linear(input_cpu, weight_cpu, bias_cpu)
+
+    input_storage_gpu = input_storage_cpu.to("webgpu")
+    weight_storage_gpu = weight_storage_cpu.to("webgpu")
+    bias_storage_gpu = bias_storage_cpu.to("webgpu")
+    input_gpu = input_storage_gpu[
+        input_offset:input_offset + inner
+    ].reshape(1, inner)
+    weight_gpu = weight_storage_gpu[
+        weight_offset:weight_offset + columns * inner
+    ].reshape(columns, inner)
+    bias_gpu = bias_storage_gpu[bias_offset:bias_offset + columns]
+
+    errors = {}
+    for variant in variants:
+        select_variant(variant)
+        actual = await to_numpy_async(F.linear(input_gpu, weight_gpu, bias_gpu))
+        expected_numpy = expected.numpy()
+        np.testing.assert_allclose(actual, expected_numpy, rtol=3e-4, atol=3e-5)
+        errors[variant] = float(np.max(np.abs(actual - expected_numpy)))
+    return {
+        "shape": [1, inner, columns],
+        "offsets": [input_offset, weight_offset, bias_offset],
+        "max_abs_error": errors,
+    }
+
+
+async def measure_variant(input_gpu, weight_gpu, bias_gpu, variant, repeats):
+    select_variant(variant)
+    for _ in range(12):
+        output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
+    await torch.webgpu.synchronize()
+
+    samples = []
+    for _ in range(7):
+        start = time.perf_counter()
+        for _ in range(repeats):
+            output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
+        await torch.webgpu.synchronize()
+        samples.append((time.perf_counter() - start) * 1000 / repeats)
+    return samples
+
+
+async def benchmark_case(inner, columns, repeats):
+    input_cpu = torch.empty((1, inner))
+    weight_cpu = torch.empty((columns, inner))
+    bias_cpu = torch.empty(columns)
+    input_cpu.uniform_(-0.02, 0.02)
+    weight_cpu.uniform_(-0.02, 0.02)
+    bias_cpu.uniform_(-0.01, 0.01)
+    expected = F.linear(input_cpu, weight_cpu, bias_cpu)
+    input_gpu = input_cpu.to("webgpu")
+    weight_gpu = weight_cpu.to("webgpu")
+    bias_gpu = bias_cpu.to("webgpu")
+
+    measurements = {}
+    errors = {}
+    for variant in variants:
+        select_variant(variant)
+        actual = await to_numpy_async(F.linear(input_gpu, weight_gpu, bias_gpu))
+        expected_numpy = expected.numpy()
+        np.testing.assert_allclose(actual, expected_numpy, rtol=3e-4, atol=3e-5)
+        errors[variant] = float(np.max(np.abs(actual - expected_numpy)))
+        samples = await measure_variant(
+            input_gpu, weight_gpu, bias_gpu, variant, repeats
+        )
+        median_ms = statistics.median(samples)
+        measurements[variant] = {
+            "median_ms": median_ms,
+            "samples_ms": samples,
+            "gflops": 2 * inner * columns / (median_ms * 1_000_000),
+        }
+
+    result = {
+        "shape": [1, inner, columns],
+        "repeats": repeats,
+        "samples": 7,
+        "max_abs_error": errors,
+        "variants": measurements,
+    }
+    if subgroup_s4_available:
+        result["s4_speedup"] = (
+            measurements["portable"]["median_ms"] /
+            measurements["s4"]["median_ms"]
+        )
+
+    del input_gpu, weight_gpu, bias_gpu
+    del input_cpu, weight_cpu, bias_cpu, expected
+    gc.collect()
+    return result
+
+
+torch.manual_seed(0)
+with torch.no_grad():
+    correctness = await check_tail_offsets_and_bias()
+    cases = [(256, 768, 64), (4096, 4096, 16)]
+    if bool(js.webgpuTest.extended):
+        cases += [(4096, 11008, 8), (11008, 4096, 8)]
+    benchmarks = []
+    for inner, columns, repeats in cases:
+        benchmarks.append(await benchmark_case(inner, columns, repeats))
+
+select_variant("s4" if subgroup_s4_available else "portable")
+assert torch.webgpu.cpu_fallbacks() == 0
+json.dumps({
+    "torch": torch.__version__,
+    "subgroup_s4_available": subgroup_s4_available,
+    "correctness": correctness,
+    "benchmarks": benchmarks,
+    "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
+})
+`);
+    await device.queue.onSubmittedWorkDone();
+    const scopedError = await device.popErrorScope();
+    if (scopedError !== null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+    window.webgpuTest.result = JSON.parse(result);
+    report(JSON.stringify(window.webgpuTest.result, null, 2));
+    window.webgpuTest.ok = true;
+    window.webgpuTest.message = "WebGPU linear benchmark passed";
+    report(window.webgpuTest.message);
+  } catch (error) {
+    window.webgpuTest.message = error?.stack ?? String(error);
+    console.error(window.webgpuTest.message);
+  } finally {
+    window.webgpuTest.done = true;
+  }
+</script>

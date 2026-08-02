@@ -1,0 +1,534 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU model-scale decode projection benchmark</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  const modelConfigurations = {
+    "0.5b": {
+      name: "Qwen2.5-0.5B",
+      hidden: 896,
+      intermediate: 4864,
+      kvWidth: 128,
+      layers: 24,
+    },
+    "1.5b": {
+      name: "Qwen2.5-1.5B",
+      hidden: 1536,
+      intermediate: 8960,
+      kvWidth: 256,
+      layers: 28,
+    },
+    "3b": {
+      name: "Qwen2.5-3B",
+      hidden: 2048,
+      intermediate: 11008,
+      kvWidth: 256,
+      layers: 36,
+    },
+    "7b": {
+      name: "Qwen2.5-7B",
+      hidden: 3584,
+      intermediate: 18944,
+      kvWidth: 512,
+      layers: 28,
+    },
+  };
+
+  function makeTimestampProfiler(device, requestedCapacity = 2048) {
+    const capacity = Math.min(
+      requestedCapacity,
+      Math.floor((device.limits.maxQueryCount ?? 4096) / 2),
+    );
+    const stride = 256;
+    const querySet = device.createQuerySet({
+      type: "timestamp",
+      count: capacity * 2,
+    });
+    const resolveBuffer = device.createBuffer({
+      label: "decode scaling timestamp resolve buffer",
+      size: capacity * stride,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+    });
+    let count = 0;
+
+    const wrappedDevice = new Proxy(device, {
+      get(target, property) {
+        if (property !== "createCommandEncoder") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (descriptor) => {
+          const encoder = target.createCommandEncoder(descriptor);
+          const slots = [];
+          return new Proxy(encoder, {
+            get(encoderTarget, encoderProperty) {
+              if (encoderProperty === "beginComputePass") {
+                return (passDescriptor) => {
+                  if (count >= capacity) {
+                    throw new Error(
+                      "decode scaling timestamp capacity exceeded",
+                    );
+                  }
+                  const slot = count++;
+                  slots.push(slot);
+                  return encoderTarget.beginComputePass({
+                    ...(passDescriptor ?? {}),
+                    timestampWrites: {
+                      querySet,
+                      beginningOfPassWriteIndex: slot * 2,
+                      endOfPassWriteIndex: slot * 2 + 1,
+                    },
+                  });
+                };
+              }
+              if (encoderProperty === "finish") {
+                return (finishDescriptor) => {
+                  for (const slot of slots) {
+                    encoderTarget.resolveQuerySet(
+                      querySet,
+                      slot * 2,
+                      2,
+                      resolveBuffer,
+                      slot * stride,
+                    );
+                  }
+                  return encoderTarget.finish(finishDescriptor);
+                };
+              }
+              const value = Reflect.get(
+                encoderTarget,
+                encoderProperty,
+                encoderTarget,
+              );
+              return typeof value === "function"
+                ? value.bind(encoderTarget)
+                : value;
+            },
+          });
+        };
+      },
+    });
+
+    return {
+      device: wrappedDevice,
+      get count() {
+        return count;
+      },
+      async readMilliseconds() {
+        await device.queue.onSubmittedWorkDone();
+        if (count === 0) return [];
+        const byteLength = count * stride;
+        const readback = device.createBuffer({
+          label: "decode scaling timestamp readback",
+          size: byteLength,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const encoder = device.createCommandEncoder();
+        encoder.copyBufferToBuffer(resolveBuffer, 0, readback, 0, byteLength);
+        device.queue.submit([encoder.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        try {
+          const words = new BigUint64Array(readback.getMappedRange());
+          return Array.from({ length: count }, (_, slot) => {
+            const base = (slot * stride) / BigUint64Array.BYTES_PER_ELEMENT;
+            return Number(words[base + 1] - words[base]) / 1_000_000;
+          });
+        } finally {
+          readback.unmap();
+          readback.destroy();
+          resolveBuffer.destroy();
+          querySet.destroy();
+        }
+      },
+    };
+  }
+
+  const median = (values) => {
+    const ordered = [...values].sort((left, right) => left - right);
+    return ordered[Math.floor(ordered.length / 2)];
+  };
+
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const modelKey = parameters.get("model") ?? "0.5b";
+    const variant = parameters.get("variant") ?? "auto";
+    const modelConfiguration = modelConfigurations[modelKey];
+    if (!wheel || !filelockWheel || !navigator.gpu) {
+      throw new Error("WebGPU or benchmark wheel parameters are unavailable");
+    }
+    if (modelConfiguration === undefined) {
+      throw new Error(`unsupported model configuration: ${modelKey}`);
+    }
+    if (!new Set(["auto", "portable", "s4"]).has(variant)) {
+      throw new Error(`unsupported linear GEMV variant: ${variant}`);
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null) throw new Error("requestAdapter returned null");
+    if (!adapter.features.has("timestamp-query")) {
+      throw new Error("timestamp-query is unavailable");
+    }
+    const requiredFeatures = ["timestamp-query"];
+    if (adapter.features.has("subgroups")) requiredFeatures.push("subgroups");
+    const maximumWeightBytes =
+      4 *
+      Math.max(
+        modelConfiguration.hidden * modelConfiguration.hidden,
+        modelConfiguration.hidden * modelConfiguration.kvWidth,
+        modelConfiguration.hidden * modelConfiguration.intermediate,
+        modelConfiguration.intermediate * modelConfiguration.hidden,
+      );
+    if (
+      maximumWeightBytes > adapter.limits.maxBufferSize ||
+      maximumWeightBytes > adapter.limits.maxStorageBufferBindingSize
+    ) {
+      throw new Error(
+        `model weight buffer ${maximumWeightBytes} exceeds adapter limits`,
+      );
+    }
+    const device = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: {
+        maxBufferSize: maximumWeightBytes,
+        maxStorageBufferBindingSize: maximumWeightBytes,
+      },
+    });
+    window.webgpuRawDevice = device;
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    const timestampProfiler = makeTimestampProfiler(device);
+    window.webgpuTestDevice = timestampProfiler.device;
+    window.webgpuTimestampCount = () => timestampProfiler.count;
+    window.webgpuTest.modelKey = modelKey;
+    window.webgpuTest.modelConfig = modelConfiguration;
+    window.webgpuTest.variant = variant;
+    window.webgpuTest.adapter = {
+      userAgent: navigator.userAgent,
+      architecture: adapter.info?.architecture ?? "",
+      description: adapter.info?.description ?? "",
+      device: adapter.info?.device ?? "",
+      vendor: adapter.info?.vendor ?? "",
+      subgroupMinSize: adapter.info?.subgroupMinSize ?? null,
+      subgroupMaxSize: adapter.info?.subgroupMaxSize ?? null,
+      adapterFeatures: [...adapter.features].sort(),
+      deviceFeatures: [...device.features].sort(),
+      maximumWeightBytes,
+      maxBufferSize: device.limits.maxBufferSize,
+      maxStorageBufferBindingSize: device.limits.maxStorageBufferBindingSize,
+      maxComputeInvocationsPerWorkgroup:
+        adapter.limits.maxComputeInvocationsPerWorkgroup,
+    };
+    report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
+    report(`model: ${JSON.stringify(modelConfiguration)}`);
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import gc
+import json
+import statistics
+import time
+
+import js
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.webgpu
+
+
+assert torch.webgpu.is_available()
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+model = dict(js.webgpuTest.modelConfig.to_py())
+variant = str(js.webgpuTest.variant)
+hidden = int(model["hidden"])
+intermediate = int(model["intermediate"])
+kv_width = int(model["kvWidth"])
+layers = int(model["layers"])
+warmups = 12
+samples = 7
+target_bytes_per_sample = 512 * 1024 * 1024
+state = torch.webgpu._state()
+if variant != "auto":
+    state.linearGemvVariant = variant
+
+
+def diagnostic_delta(before, after):
+    names = (
+        "dispatches",
+        "buffer_allocations",
+        "buffer_releases",
+        "command_submissions",
+        "uploads",
+        "gpu_copies",
+        "shader_compilations",
+        "pipeline_creations",
+        "readbacks",
+    )
+    return {name: int(after[name] - before[name]) for name in names}
+
+
+async def to_numpy_async(tensor):
+    # The frozen Pyodide 3.14 wheel has a separate torch.from_numpy bridge
+    # regression after valid WebGPU readback. Keep correctness checks on the
+    # runtime's raw copy/map path and return the copied NumPy array directly.
+    torch.webgpu._flush()
+    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
+    state = torch.webgpu._state()
+    source = state.buffers.get(int(torch.ops.webgpu.buffer_id(tensor)))
+    descriptor = js.Object.new()
+    descriptor.label = "decode scaling correctness readback"
+    descriptor.size = max(4, nbytes)
+    descriptor.usage = 0x0001 | 0x0008
+    readback = state.device.createBuffer(descriptor)
+    encoder = state.device.createCommandEncoder()
+    encoder.copyBufferToBuffer(
+        source, int(tensor.storage_offset()) * tensor.element_size(),
+        readback, 0, max(4, nbytes),
+    )
+    commands = js.Array.new()
+    commands.push(encoder.finish())
+    state.queue.submit(commands)
+    state.commandSubmissions += 1
+    state.commandBuffersSubmitted += 1
+    state.readbacks += 1
+    await readback.mapAsync(js.GPUMapMode.READ)
+    try:
+        byte_view = js.Uint8Array.new(readback.getMappedRange(0, max(4, nbytes)))
+        return np.frombuffer(
+            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
+        ).copy().reshape(tuple(tensor.shape))
+    finally:
+        readback.unmap()
+        readback.destroy()
+
+
+async def measure_projection(name, inner, columns, calls_per_layer):
+    weight_bytes = 4 * inner * columns
+    repeats = max(3, min(32, target_bytes_per_sample // weight_bytes))
+    live_buffers_before = int(state.buffers.size)
+
+    # WebGPU buffers are zero-initialized. Allocate the large weight directly
+    # on the GPU so each projection is timed without constructing or retaining
+    # a model-scale CPU tensor.
+    input_gpu = torch.zeros((1, inner), dtype=torch.float32).to("webgpu")
+    weight_gpu = torch.empty(
+        (columns, inner), dtype=torch.float32, device="webgpu"
+    )
+    bias_cpu = (
+        (torch.arange(columns, dtype=torch.float32) % 17) - 8
+    ) * 0.001
+    bias_gpu = bias_cpu.to("webgpu")
+
+    for _ in range(warmups):
+        output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
+    await torch.webgpu.synchronize()
+
+    actual = await to_numpy_async(output_gpu)
+    np.testing.assert_allclose(
+        actual, bias_cpu.numpy().reshape(1, columns), rtol=0.0, atol=0.0
+    )
+
+    wall_samples = []
+    timestamp_ranges = []
+    sample_diagnostics = []
+    for _ in range(samples):
+        before = torch.webgpu.diagnostics()
+        timestamp_start = int(js.webgpuTimestampCount())
+        started = time.perf_counter()
+        for _ in range(repeats):
+            output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
+        await torch.webgpu.synchronize()
+        wall_samples.append((time.perf_counter() - started) * 1000 / repeats)
+        timestamp_ranges.append(
+            [timestamp_start, int(js.webgpuTimestampCount())]
+        )
+        sample_diagnostics.append(
+            diagnostic_delta(before, torch.webgpu.diagnostics())
+        )
+
+    median_diagnostics = {
+        field: float(statistics.median(
+            delta[field] / repeats for delta in sample_diagnostics
+        ))
+        for field in sample_diagnostics[0]
+    }
+    result = {
+        "name": name,
+        "shape": {"m": 1, "k": inner, "n": columns},
+        "calls_per_layer": calls_per_layer,
+        "weight_bytes": weight_bytes,
+        "weight_gb": weight_bytes / 1_000_000_000,
+        "flops": 2 * inner * columns,
+        "warmups": warmups,
+        "samples": samples,
+        "repeats_per_sample": repeats,
+        "wall_timing": {
+            "kind": "wall_clock_queued_and_synchronized",
+            "ms_per_call_samples": wall_samples,
+            "median_ms_per_call": float(statistics.median(wall_samples)),
+        },
+        "gpu_timestamp_ranges": timestamp_ranges,
+        "median_diagnostics_per_call": median_diagnostics,
+        "live_buffers_before": live_buffers_before,
+    }
+
+    del actual, output_gpu, input_gpu, weight_gpu, bias_gpu, bias_cpu
+    gc.collect()
+    await torch.webgpu.synchronize()
+    result["live_buffers_after"] = int(state.buffers.size)
+    result["post_cleanup_diagnostics"] = torch.webgpu.diagnostics()
+    return result
+
+
+projection_shapes = (
+    ("h_to_h", hidden, hidden, 2),
+    ("h_to_kv", hidden, kv_width, 2),
+    ("h_to_i", hidden, intermediate, 2),
+    ("i_to_h", intermediate, hidden, 1),
+)
+
+results = []
+with torch.no_grad():
+    for name, inner, columns, calls_per_layer in projection_shapes:
+        results.append(await measure_projection(
+            name, inner, columns, calls_per_layer
+        ))
+
+assert torch.webgpu.cpu_fallbacks() == 0
+json.dumps({
+    "torch": torch.__version__,
+    "model": model,
+    "variant": variant,
+    "projection_shape_note": (
+        "Stock Qwen projection shapes: q and o use H->H, k and v use "
+        "H->K where K is the GQA key/value width, gate and up use H->I, "
+        "and down uses I->H."
+    ),
+    "layers": layers,
+    "warmups": warmups,
+    "samples": samples,
+    "projections": results,
+    "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
+    "diagnostics": torch.webgpu.diagnostics(),
+})
+`);
+    await device.queue.onSubmittedWorkDone();
+    const scopedError = await device.popErrorScope();
+    if (scopedError !== null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+
+    window.webgpuTest.result = JSON.parse(result);
+    const timestampMilliseconds = await timestampProfiler.readMilliseconds();
+    for (const projection of window.webgpuTest.result.projections) {
+      const gpuSamples = projection.gpu_timestamp_ranges.map(
+        ([start, end]) =>
+          timestampMilliseconds
+            .slice(start, end)
+            .reduce((total, value) => total + value, 0) /
+          projection.repeats_per_sample,
+      );
+      const gpuMedian = median(gpuSamples);
+      const wallMedian = projection.wall_timing.median_ms_per_call;
+      projection.gpu_timing = {
+        kind: "webgpu_timestamp_query",
+        ms_per_call_samples: gpuSamples,
+        median_ms_per_call: gpuMedian,
+      };
+      projection.wall_effective_gflops =
+        projection.flops / (wallMedian * 1_000_000);
+      projection.gpu_effective_gflops =
+        projection.flops / (gpuMedian * 1_000_000);
+      projection.wall_implied_weight_gbps =
+        projection.weight_bytes / (wallMedian * 1_000_000);
+      projection.gpu_implied_weight_gbps =
+        projection.weight_bytes / (gpuMedian * 1_000_000);
+      projection.fixed_overhead_fraction = Math.max(
+        0,
+        (wallMedian - gpuMedian) / wallMedian,
+      );
+    }
+
+    const layerWallMilliseconds = window.webgpuTest.result.projections.reduce(
+      (total, projection) =>
+        total +
+        projection.calls_per_layer * projection.wall_timing.median_ms_per_call,
+      0,
+    );
+    const layerGpuMilliseconds = window.webgpuTest.result.projections.reduce(
+      (total, projection) =>
+        total +
+        projection.calls_per_layer * projection.gpu_timing.median_ms_per_call,
+      0,
+    );
+    const layers = window.webgpuTest.result.layers;
+    window.webgpuTest.result.projection_only_estimate = {
+      note:
+        "Hot-repeat stock-shape projection-only estimate. It derives seven calls per layer as 2×H→H + 2×H→K(GQA KV width) + 2×H→I + 1×I→H from four isolated M=1 fp32 measurements. Repeated samples reuse one hot weight buffer. The estimate excludes the vocabulary head, model-weight residency/capacity effects, attention, normalization, activation, embedding, KV-cache, sampling, and other runtime work.",
+      calls_per_layer: 7,
+      per_layer_wall_ms: layerWallMilliseconds,
+      per_layer_gpu_ms: layerGpuMilliseconds,
+      per_layer_wall_tokens_per_second: 1000 / layerWallMilliseconds,
+      per_layer_gpu_tokens_per_second: 1000 / layerGpuMilliseconds,
+      full_model_wall_ms_per_token: layers * layerWallMilliseconds,
+      full_model_gpu_ms_per_token: layers * layerGpuMilliseconds,
+      full_model_wall_tokens_per_second:
+        1000 / (layers * layerWallMilliseconds),
+      full_model_gpu_tokens_per_second:
+        1000 / (layers * layerGpuMilliseconds),
+      aggregate_fixed_overhead_fraction: Math.max(
+        0,
+        (layerWallMilliseconds - layerGpuMilliseconds) /
+          layerWallMilliseconds,
+      ),
+    };
+    window.webgpuTest.ok = true;
+    window.webgpuTest.message = "WebGPU decode projection scaling benchmark passed";
+    report(JSON.stringify(window.webgpuTest.result, null, 2));
+    report(window.webgpuTest.message);
+  } catch (error) {
+    const scopedError = await window.webgpuRawDevice?.popErrorScope();
+    if (scopedError != null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    window.webgpuTest.message = error?.stack ?? String(error);
+    console.error(window.webgpuTest.message);
+  } finally {
+    window.webgpuTest.done = true;
+  }
+</script>

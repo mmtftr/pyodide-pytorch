@@ -42,6 +42,7 @@ def expected_inputs() -> dict[str, Any]:
     patches = sorted((ROOT / "patches" / "pytorch").glob("*.patch"))
     return {
         "build_script_sha256": sha256(ROOT / "scripts" / "build_wheel.sh"),
+        "cmake_hooks_tree_sha256": tree_sha256(ROOT / "scripts" / "cmake"),
         "staging_script_sha256": sha256(
             ROOT / "scripts" / "stage_webgpu_sources.py"
         ),
@@ -57,11 +58,23 @@ def expected_inputs() -> dict[str, Any]:
     }
 
 
-def verify(directory: Path, builder_commit: str) -> tuple[Path | None, list[str]]:
+def verify_contents(
+    directory: Path,
+) -> tuple[Path | None, dict[str, Any] | None, list[str]]:
+    """Verify the self-contained wheel, checksum, and manifest inventory.
+
+    This intentionally does not bind the artifact to a source checkout.  Callers
+    that publish or deploy a release must additionally use :func:`verify`.
+    Local playground assembly uses this narrower check so a previously built,
+    internally consistent wheel can be exercised while newer sources are dirty.
+    """
     errors: list[str] = []
+    if not directory.is_dir():
+        return None, None, [f"artifact directory does not exist: {directory}"]
     wheels = sorted(directory.glob("*.whl"))
     manifests = sorted(directory.glob("build-manifest.json"))
     checksums = sorted(directory.glob("*.sha256"))
+    entries = sorted(directory.iterdir())
 
     if len(wheels) != 1:
         errors.append(f"expected exactly one wheel, found {len(wheels)}")
@@ -69,8 +82,11 @@ def verify(directory: Path, builder_commit: str) -> tuple[Path | None, list[str]
         errors.append(f"expected exactly one build-manifest.json, found {len(manifests)}")
     if len(checksums) != 1:
         errors.append(f"expected exactly one SHA-256 file, found {len(checksums)}")
+    expected_file_count = len(wheels) + len(manifests) + len(checksums)
+    if len(entries) != expected_file_count:
+        errors.append("release artifact contains unexpected companion files")
     if errors:
-        return (wheels[0] if len(wheels) == 1 else None), errors
+        return (wheels[0] if len(wheels) == 1 else None), None, errors
 
     wheel = wheels[0]
     manifest_path = manifests[0]
@@ -94,16 +110,13 @@ def verify(directory: Path, builder_commit: str) -> tuple[Path | None, list[str]
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         errors.append(f"cannot read build manifest: {exc}")
-        return wheel, errors
+        return wheel, None, errors
+    if not isinstance(manifest, dict):
+        errors.append("build manifest must contain a JSON object")
+        return wheel, None, errors
 
     if manifest.get("schema_version") != 1:
         errors.append("unsupported build manifest schema")
-    if manifest.get("builder_repository_commit") != builder_commit:
-        errors.append("build manifest commit does not match the source workflow run")
-    if manifest.get("configuration") != config.load():
-        errors.append("build manifest configuration does not match the current pins")
-    if manifest.get("inputs") != expected_inputs():
-        errors.append("build manifest input hashes do not match the current sources")
 
     wheel_record = manifest.get("wheel")
     expected_wheel = {
@@ -113,6 +126,20 @@ def verify(directory: Path, builder_commit: str) -> tuple[Path | None, list[str]
     }
     if wheel_record != expected_wheel:
         errors.append("build manifest wheel metadata does not match the downloaded wheel")
+    return wheel, manifest, errors
+
+
+def verify(directory: Path, builder_commit: str) -> tuple[Path | None, list[str]]:
+    wheel, manifest, errors = verify_contents(directory)
+    if manifest is None:
+        return wheel, errors
+
+    if manifest.get("builder_repository_commit") != builder_commit:
+        errors.append("build manifest commit does not match the source workflow run")
+    if manifest.get("configuration") != config.load():
+        errors.append("build manifest configuration does not match the current pins")
+    if manifest.get("inputs") != expected_inputs():
+        errors.append("build manifest input hashes do not match the current sources")
     return wheel, errors
 
 

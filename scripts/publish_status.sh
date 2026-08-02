@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-context="${1:?usage: publish_status.sh CONTEXT STATUS}"
-job_status="${2:?usage: publish_status.sh CONTEXT STATUS}"
+context="${1:?usage: publish_status.sh CONTEXT STATUS [COMMIT]}"
+job_status="${2:?usage: publish_status.sh CONTEXT STATUS [COMMIT]}"
+commit="${3:-$GITHUB_SHA}"
 
 case "$job_status" in
   pending | queued | in_progress)
@@ -23,7 +24,7 @@ description="$context: $job_status"
 target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
 gh api --method POST \
-  "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+  "repos/$GITHUB_REPOSITORY/statuses/$commit" \
   -f state="$state" \
   -f context="$context" \
   -f description="$description" \

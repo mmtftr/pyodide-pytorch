@@ -2,38 +2,32 @@ name: Build PyTorch wheel
 
 on:
   workflow_dispatch:
-  create:
   push:
     branches: [main]
-    tags: ["torch-*-pyodide-*"]
     paths:
       - "config/**"
       - "patches/**"
       - "vendor/**"
       - "webgpu/**"
       - "scripts/**"
+      - "site/**"
       - "tests/**"
       - ".github/workflows/build.yml"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/publish-release.yml"
 
 concurrency:
   group: pytorch-pyodide-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'create' }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
   id-token: write
   attestations: write
   statuses: write
 
 jobs:
   build:
-    if: >-
-      github.event_name != 'create' ||
-      (
-        github.event.ref_type == 'branch' &&
-        startsWith(github.event.ref, 'release/torch-') &&
-        contains(github.event.ref, '-pyodide-')
-      )
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -52,27 +46,26 @@ jobs:
           python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
           python3 scripts/config.py env >> "$GITHUB_ENV"
 
-      - name: Verify release request
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
+      - name: Reserve release identity
         env:
-          CREATED_REF: ${{ github.event.ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            requested_tag="${CREATED_REF#release/}"
-          else
-            requested_tag="$GITHUB_REF_NAME"
-          fi
-          if [[ "$requested_tag" != "$RELEASE_TAG" ]]; then
-            echo "::error::Requested release $requested_tag does not match pinned $RELEASE_TAG"
-            exit 1
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            git fetch --no-tags --depth=1 origin main
-            main_sha="$(git rev-parse FETCH_HEAD)"
-            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
-              echo "::error::Release branches must point at the current main commit $main_sha"
+          api_error="$(mktemp)"
+          if tag_ref="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+              --jq '.object.type + " " + .object.sha' 2>"$api_error"
+          )"; then
+            if [[ "$tag_ref" != "commit $GITHUB_SHA" ]]; then
+              echo "::error::Release $RELEASE_TAG already belongs to $tag_ref. Increment the release revision before rebuilding."
               exit 1
             fi
+            echo "Retrying the build already reserved by $RELEASE_TAG at $GITHUB_SHA"
+          elif grep -Fq "(HTTP 404)" "$api_error"; then
+            echo "Release identity $RELEASE_TAG is available for $GITHUB_SHA"
+          else
+            cat "$api_error" >&2
+            echo "::error::Could not safely determine whether $RELEASE_TAG exists"
+            exit 1
           fi
 
       - name: Check out pinned PyTorch source
@@ -107,11 +100,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install \
+            -r config/build-constraints.txt \
             "pyodide-build==${PYODIDE_BUILD_VERSION}" \
-            "auditwheel-emscripten==${AUDITWHEEL_EMSCRIPTEN_VERSION}" \
-            "wheel==${WHEEL_VERSION}" \
-            "ninja==${NINJA_VERSION}" \
-            "cmake==${CMAKE_VERSION}"
+            "auditwheel-emscripten==${AUDITWHEEL_EMSCRIPTEN_VERSION}"
           actual_pyodide_build="$(python -c 'import importlib.metadata; print(importlib.metadata.version("pyodide-build"))')"
           test "$actual_pyodide_build" = "$PYODIDE_BUILD_VERSION"
           actual_auditwheel="$(python -c 'import importlib.metadata; print(importlib.metadata.version("auditwheel-emscripten"))')"
@@ -134,9 +125,9 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .ccache
-          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/cmake/**', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-
+            ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/cmake/**', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-
             ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-
             ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-
 
@@ -230,7 +221,7 @@ jobs:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_NOHASHDIR: "true"
-          CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime,system_headers
+          CCACHE_SLOPPINESS: include_file_ctime,include_file_mtime
           DEFAULT_CROSS_BUILD_ENV_URL: https://github.com/pyodide/pyodide/releases/download/${{ steps.config.outputs.pyodide_version }}/xbuildenv-${{ steps.config.outputs.pyodide_version }}.tar.bz2
           PYODIDE_XBUILDENV_PATH: ${{ github.workspace }}/.pyodide-xbuildenv
           PYODIDE_LAPACK_LIBRARY: ${{ github.workspace }}/.pyodide-lapack/lib/${{ steps.config.outputs.lapack_library }}
@@ -259,7 +250,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .ccache
-          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ccache-v3-${{ runner.os }}-${{ runner.arch }}-emcc-${{ steps.config.outputs.emscripten_version }}-${{ steps.config.outputs.python_tag }}-pyodide-build-${{ steps.config.outputs.pyodide_build_version }}-torch-${{ steps.config.outputs.pytorch_ref }}-${{ hashFiles('config/build.toml', 'config/build-constraints.txt', 'patches/pytorch/*.patch', 'scripts/build_wheel.sh', 'scripts/cmake/**', 'scripts/stage_webgpu_sources.py', 'vendor/**', 'webgpu/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Prune, vendor LAPACK, and validate wheel
         id: wheel
@@ -304,34 +295,61 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Prepare pinned Transformers browser dependencies
+        run: |
+          python scripts/prepare_transformers_browser_deps.py \
+            --output-dir wheelhouse/transformers-browser
+
       - name: Test inside pinned Pyodide
         run: |
-          npm install --no-save \
-            "puppeteer-core@25.4.0" \
-            "pyodide@$PYODIDE_VERSION"
-          node tests/smoke.mjs \
-            "${{ steps.wheel.outputs.path }}" \
-            "$PYTORCH_VERSION" \
-            "$PYTORCH_REF"
-          node tests/upstream.mjs \
-            "${{ steps.wheel.outputs.path }}" \
-            pytorch \
-            "$PYTORCH_VERSION" \
-            "$PYTORCH_REF"
-          mkdir -p wheelhouse/browser-deps
-          python -m pip download \
-            --dest wheelhouse/browser-deps \
-            --no-deps \
-            --only-binary=:all: \
-            "filelock==3.32.0"
           mapfile -t filelock_wheels < <(
-            find wheelhouse/browser-deps \
+            find wheelhouse/transformers-browser \
               -maxdepth 1 \
               -type f \
               -name 'filelock-*.whl' \
               -print
           )
           test "${#filelock_wheels[@]}" -eq 1
+          npm install --no-save \
+            "puppeteer-core@25.4.0" \
+            "pyodide@$PYODIDE_VERSION"
+          # Compile and execute the project-owned reduction shader directly so
+          # WGSL/numerical regressions fail before loading the large wheel.
+          node tests/webgpu-layer-norm-wgsl.mjs
+          # Validate the byte-packed Bool comparison/reduction/fill contract,
+          # including every shader that reads or writes Bool storage.
+          node tests/webgpu-bool-wgsl.mjs
+          # Compile and execute the shared float32 scalar-binary shader across
+          # every registered operation and exact-output aliasing profile.
+          node tests/webgpu-scalar-binary-wgsl.mjs
+          # Compile and execute both the portable and, when available, fixed-32
+          # subgroup decode-time fused SwiGLU shaders.
+          node tests/webgpu-swiglu-wgsl.mjs
+          # Validate fused paired K/V indexed writes, restricted-Long positions,
+          # and containment of invalid indices before loading the wheel.
+          node tests/webgpu-kv-cache-wgsl.mjs
+          # Validate the fixed-SIMD32 Q8 group-128 format, dequantization,
+          # storage reduction, and fail-closed device/shape boundaries.
+          node tests/webgpu-packed-gemv-wgsl.mjs
+          # Compile and execute the exact Gemma2 mask-construction and
+          # offset-weight normalization shaders before loading the wheel.
+          node tests/webgpu-gemma2-wgsl.mjs
+          # Validate broadcast float32 masked_fill against packed Bool masks,
+          # including strided offsets, rank-eight metadata, infinities, and tails.
+          node tests/webgpu-masked-fill-wgsl.mjs
+          # Validate canonical restricted-Long cumsum and isin generation
+          # plumbing, including inverted membership and strided inputs.
+          node tests/webgpu-generation-long-wgsl.mjs
+          node tests/smoke.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "$PYTORCH_VERSION" \
+            "$PYTORCH_REF" \
+            "${filelock_wheels[0]}"
+          node tests/upstream.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            pytorch \
+            "$PYTORCH_VERSION" \
+            "$PYTORCH_REF"
           # The Node smoke test above downloads the pinned Pyodide packages
           # into this cache. Unlike an xbuildenv dist directory, it is therefore
           # a complete, browser-servable runtime rather than core files only.
@@ -340,6 +358,56 @@ jobs:
             "${{ steps.wheel.outputs.path }}" \
             "${filelock_wheels[0]}" \
             "$pyodide_dist"
+          node tests/webgpu.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "${filelock_wheels[0]}" \
+            "$pyodide_dist" \
+            tests/webgpu-jspi.html
+          node tests/webgpu.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "${filelock_wheels[0]}" \
+            "$pyodide_dist" \
+            tests/webgpu-linear-benchmark.html
+
+      - name: Test hermetic Transformers WebGPU matrix
+        run: |
+          mapfile -t filelock_wheels < <(
+            find wheelhouse/transformers-browser \
+              -maxdepth 1 \
+              -type f \
+              -name 'filelock-*.whl' \
+              -print
+          )
+          mapfile -t transformers_wheels < <(
+            find wheelhouse/transformers-browser \
+              -maxdepth 1 \
+              -type f \
+              -name 'transformers-*.whl' \
+              -print
+          )
+          mapfile -t hub_wheels < <(
+            find wheelhouse/transformers-browser \
+              -maxdepth 1 \
+              -type f \
+              -name 'huggingface_hub-*.whl' \
+              -print
+          )
+          test "${#filelock_wheels[@]}" -eq 1
+          test "${#transformers_wheels[@]}" -eq 1
+          test "${#hub_wheels[@]}" -eq 1
+          node tests/transformers-webgpu.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "${filelock_wheels[0]}" \
+            "${transformers_wheels[0]}" \
+            "${hub_wheels[0]}" \
+            "$GITHUB_WORKSPACE/node_modules/pyodide"
+          node tests/transformers-webgpu.mjs \
+            "${{ steps.wheel.outputs.path }}" \
+            "${filelock_wheels[0]}" \
+            "${transformers_wheels[0]}" \
+            "${hub_wheels[0]}" \
+            "$GITHUB_WORKSPACE/node_modules/pyodide" \
+            tests/transformers-gemma2-webgpu.html
 
       - name: Upload unverified wheel after validation or smoke failure
         if: ${{ failure() && steps.wheel.outcome != 'skipped' }}
@@ -375,35 +443,6 @@ jobs:
             wheelhouse/dist/*.whl
             wheelhouse/dist/*.sha256
             wheelhouse/dist/build-manifest.json
-
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'create'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            if tag_ref="$(
-              gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-                --jq '.object.type + " " + .object.sha' 2>/dev/null
-            )"; then
-              :
-            else
-              tag_ref=""
-            fi
-            if [[ -z "$tag_ref" ]]; then
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                -f ref="refs/tags/$RELEASE_TAG" \
-                -f sha="$GITHUB_SHA" >/dev/null
-            elif [[ "$tag_ref" != "commit $GITHUB_SHA" ]]; then
-              echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
-              exit 1
-            fi
-          fi
-          gh release create "$RELEASE_TAG" \
-            --verify-tag \
-            --generate-notes \
-            --title "$RELEASE_TAG" \
-            wheelhouse/dist/*
 
       - name: Upload CMake diagnostics after failure
         if: failure()

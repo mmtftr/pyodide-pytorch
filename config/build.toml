@@ -1,7 +1,7 @@
 [pytorch]
 repository = "https://github.com/pytorch/pytorch.git"
 ref = "cf30153c4c131c8164ee7798e5022d810682e2cb"
-version = "2.13.0+pyodide314.0.2.r4"
+version = "2.13.0+pyodide314.0.2.r5"
 
 [torch_webgpu]
 repository = "https://github.com/jmaczan/torch-webgpu.git"
@@ -28,15 +28,21 @@ library = "libopenblas.so"
 sha256 = "5489d82d8b00ddd3ba283055ba14e2a03d870f1b7e9c07873d6064a8c306ea4c"
 
 [release]
-tag = "torch-2.13.0-pyodide-314.0.2-r4"
+tag = "torch-2.13.0-pyodide-314.0.2-r5"
 
 [build]
 max_jobs = 3
 maximum_wheel_mib = 80
 
 [host_tools]
-wheel_version = "0.47.0"
-ninja_version = "1.13.0"
 cmake_version = "3.27.9"
+ninja_version = "1.13.0"
 numpy_version = "2.4.3"
+packaging_version = "26.2"
+pyyaml_version = "6.0.3"
+requests_version = "2.34.2"
+setuptools_version = "81.0.0"
+six_version = "1.17.0"
+typing_extensions_version = "4.16.0"
+wheel_version = "0.47.0"
 auditwheel_emscripten_version = "0.2.5"

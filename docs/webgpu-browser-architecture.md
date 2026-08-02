@@ -77,14 +77,38 @@ textures, or native `WaitAny`.
 
 CPU-to-GPU upload calls `GPUQueue.writeBuffer` synchronously with the current
 Emscripten `HEAPU8`. Pyodide allows Wasm memory growth, so no heap view or Wasm
-pointer is cached across an `await`. GPU-to-CPU remains the explicit Python
+pointer is cached across an `await`. GPU-to-CPU always has the explicit Python
 coroutine `torch.webgpu.to_cpu_async`: it copies into a MAP_READ buffer, awaits
 `mapAsync`, copies the mapped bytes, and then unmaps and destroys the temporary
-buffer. Synchronous `.cpu()` and `.item()` fail with a directed error.
+buffer. The CPU tensor is built with `torch.frombuffer(...).clone()` rather
+than `torch.from_numpy()`. This avoids the Pyodide/PyTorch bridge regression
+that raised `element_size must be 0`, and the clone gives PyTorch-owned storage
+after the temporary NumPy array is collected.
+
+`torch.webgpu.to_cpu_sync`, WebGPU `Tensor.cpu()`, and WebGPU `Tensor.item()`
+use Pyodide's JSPI `run_sync` bridge around that same coroutine. They work only
+when `pyodide.ffi.can_run_sync()` is true and Python was entered through
+`runPythonAsync()` or a PyProxy `callPromising()` call. `runPython()` and a
+direct synchronous PyProxy call receive a directed error naming both valid
+entrypoints and the async fallback. Ordinary CPU tensors still delegate to
+PyTorch's original `cpu()` and `item()` methods.
+
+JSPI must be feature-detected rather than inferred from a user agent. Chrome
+137 and later ship JSPI without a browser flag; Node 24 still needs
+`--experimental-wasm-jspi`. Runtimes without stack switching must continue to
+use `await torch.webgpu.to_cpu_async(tensor)`. See Pyodide's
+[JSPI overview](https://blog.pyodide.org/posts/jspi/) and
+[`run_sync` API](https://pyodide.org/en/stable/usage/api/python-api/ffi.html#pyodide.ffi.run_sync).
 
 Float32 activations and int32 token IDs use the same raw 32-bit buffer path.
+Restricted Long token/position tensors retain normal 8-byte ATen storage and
+use two adjacent 32-bit words per logical element; the high word must be the
+sign extension of a signed-int32 low word.
 The tensor dtype remains native PyTorch metadata; every operator checks the
-expected dtype before interpreting those bytes.
+expected dtype before interpreting those bytes. Bool retains ATen's one-byte
+storage contract. WGSL sees the same bytes as packed `u32` words, and Bool
+kernels assign one invocation per destination word (or serialize arbitrary
+strided writes) so two invocations never race on adjacent bytes.
 
 ## Imported operator policy
 
@@ -110,7 +134,16 @@ live in the project-owned `webgpu/llm_kernels` directory, never under
 source trees and generates a C++ header containing its WGSL. The wheel thus
 performs no runtime shader-file reads and no network fetch. The initial set is
 strided copy/concatenation, int32 embedding, batched matrix multiplication,
-LayerNorm, RMSNorm, and fused causal or float-mask SDPA with GQA head mapping.
+LayerNorm, RMSNorm, last-dimension greedy argmax, and fused causal or
+float-mask SDPA with GQA head mapping.
+The LayerNorm path flattens an arbitrary nonempty normalized suffix after
+GPU-only contiguous materialization (ranks up to eight), then assigns one
+workgroup to each prefix row. Its WGSL combines Welford `(count, mean, M2)`
+states instead of subtracting two large moments. It writes the native output,
+mean, and reciprocal-standard-deviation tuple in one dispatch and binds absent
+affine inputs only through read-only aliases, avoiding WebGPU's same-buffer
+read/write validation conflict. Empty prefix rows validate metadata and return
+without encoding a command.
 Rotary encoding in the browser test is composed from slice, negate,
 concatenation, multiply, and add instead of introducing a model-specific
 kernel.

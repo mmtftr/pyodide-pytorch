@@ -1,0 +1,233 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Pinned Gemma2 WebGPU acceptance test</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const transformersWheel = parameters.get("transformers");
+    const hubWheel = parameters.get("hub");
+    if (!wheel || !filelockWheel || !transformersWheel || !hubWheel) {
+      throw new Error("wheel query parameters are missing");
+    }
+    const adapter = await navigator.gpu?.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (!adapter) throw new Error("WebGPU adapter unavailable");
+    const device = await adapter.requestDevice();
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+    });
+    window.webgpuTestDevice = device;
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "fsspec",
+      "jinja2",
+      "networkx",
+      "numpy",
+      "pyyaml",
+      "regex",
+      "requests",
+      "safetensors",
+      "sympy",
+      "tqdm",
+      "typing-extensions",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+    await pyodide.loadPackage(`/dependency/${hubWheel}`);
+    await pyodide.loadPackage(`/dependency/${transformersWheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import contextlib
+import gc
+import importlib.util
+import json
+import os
+
+import js
+import torch
+import torch.webgpu
+from torch.utils._python_dispatch import TorchDispatchMode
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+import transformers
+from transformers.utils import is_tokenizers_available
+
+bootstrap_response = await js.fetch(
+    "/runtime/transformers_browser_bootstrap.py"
+)
+if not bootstrap_response.ok:
+    raise RuntimeError(
+        f"bootstrap request failed: {bootstrap_response.status}"
+    )
+bootstrap = {}
+exec(await bootstrap_response.text(), bootstrap)
+assert bootstrap["disable_optional_gguf_without_tokenizers"]()
+
+gemma_response = await js.fetch(
+    "/runtime/transformers_gemma2_webgpu.py"
+)
+if not gemma_response.ok:
+    raise RuntimeError(
+        f"Gemma2 adapter request failed: {gemma_response.status}"
+    )
+gemma = {}
+exec(await gemma_response.text(), gemma)
+rms_adapter = gemma["enable_webgpu_gemma2_rms_norm"]()
+scalar_adapter = gemma["enable_webgpu_gemma2_scalar_normalizer"]()
+assert rms_adapter["newly_patched"] == 1
+assert scalar_adapter["newly_patched"] == 1
+assert gemma["enable_webgpu_gemma2_rms_norm"]()["already_patched"] == 1
+assert gemma["enable_webgpu_gemma2_scalar_normalizer"]()["already_patched"] == 1
+
+fixture_response = await js.fetch("/fixtures/transformers_tiny.json")
+if not fixture_response.ok:
+    raise RuntimeError(f"fixture request failed: {fixture_response.status}")
+fixture = json.loads(await fixture_response.text())
+assert transformers.__version__ == fixture["transformers_version"] == "4.46.3"
+assert importlib.util.find_spec("tokenizers") is None
+assert not is_tokenizers_available()
+
+
+class OpRecorder(TorchDispatchMode):
+    def __init__(self):
+        self.counts = {}
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        del types
+        schema = func._schema
+        name = schema.name
+        if schema.overload_name:
+            name += "." + schema.overload_name
+        self.counts[name] = self.counts.get(name, 0) + 1
+        return func(*args, **(kwargs or {}))
+
+
+spec = next(
+    row
+    for row in fixture["architecture_audit_models"]
+    if row["name"] == "gemma2"
+)
+config = transformers.Gemma2Config(**spec["kwargs"])
+config._attn_implementation = "sdpa"
+torch.manual_seed(fixture["seed"] + 100)
+model = transformers.Gemma2ForCausalLM(config).eval()
+cpu_inputs = {
+    "input_ids": torch.tensor(fixture["input_ids"], dtype=torch.long),
+    "position_ids": torch.tensor(
+        fixture["position_ids"], dtype=torch.long
+    ),
+    "cache_position": torch.tensor(
+        fixture["cache_position"], dtype=torch.long
+    ),
+    "use_cache": False,
+    "return_dict": True,
+}
+cpu_recorder = OpRecorder()
+with torch.no_grad(), cpu_recorder:
+    expected = model(**cpu_inputs).logits.detach().clone()
+assert sum(cpu_recorder.counts.values()) == spec["expected_cpu_operator_count"]
+assert len(cpu_recorder.counts) == spec["expected_cpu_distinct_operators"]
+assert cpu_recorder.counts.get("webgpu::gemma_rms_norm", 0) == 0
+assert cpu_recorder.counts.get("aten::mean.dim", 0) == 9
+
+await torch.webgpu.init(device=js.webgpuTestDevice)
+model.to("webgpu")
+gpu_inputs = {
+    key: value.to("webgpu") if isinstance(value, torch.Tensor) else value
+    for key, value in cpu_inputs.items()
+}
+before = torch.webgpu.diagnostics()
+gpu_recorder = OpRecorder()
+batch = getattr(torch.webgpu, "batch", contextlib.nullcontext)
+with torch.no_grad(), batch(), gpu_recorder:
+    actual_gpu = model(**gpu_inputs).logits
+actual = await torch.webgpu.to_cpu_async(actual_gpu)
+after = torch.webgpu.diagnostics()
+
+torch.testing.assert_close(actual, expected, rtol=8e-4, atol=8e-5)
+dispatches = int(after["dispatches"] - before["dispatches"])
+readbacks = int(after["readbacks"] - before["readbacks"])
+fallbacks = int(after["cpu_fallbacks"] - before["cpu_fallbacks"])
+assert readbacks == 1, readbacks
+assert fallbacks == 0, fallbacks
+assert gpu_recorder.counts.get("webgpu::gemma_rms_norm", 0) == 9
+assert gpu_recorder.counts.get("aten::mean.dim", 0) == 0
+for name, expected_count in (
+    ("aten::gt.Tensor", 1),
+    ("aten::triu", 1),
+    ("aten::mul_.Tensor", 1),
+    ("aten::tril", 1),
+    ("aten::where.self", 1),
+):
+    assert gpu_recorder.counts.get(name, 0) == expected_count, (
+        name,
+        gpu_recorder.counts,
+    )
+assert not any(
+    tensor.device.type == "cpu"
+    for tensor in getattr(model.model, gemma["_GEMMA2_NORMALIZER_CACHE"])
+    if isinstance(tensor, torch.Tensor)
+)
+
+validation_error = await js.webgpuTestDevice.popErrorScope()
+if validation_error:
+    raise RuntimeError(
+        "Gemma2 WebGPU validation error: " + validation_error.message
+    )
+if js.webgpuTest.validationErrors:
+    raise RuntimeError("; ".join(js.webgpuTest.validationErrors))
+
+json.dumps({
+    "transformers_version": transformers.__version__,
+    "model": spec["model_class"],
+    "output_shape": list(actual.shape),
+    "dispatches": dispatches,
+    "readbacks": readbacks,
+    "cpu_fallbacks": fallbacks,
+    "gpu_operator_counts": dict(sorted(gpu_recorder.counts.items())),
+    "cpu_operator_counts": dict(sorted(cpu_recorder.counts.items())),
+    "rms_norm_adapter": rms_adapter,
+    "scalar_normalizer_adapter": scalar_adapter,
+})
+`);
+    const diagnostics = JSON.parse(result);
+    window.webgpuTest = {
+      done: true,
+      ok: true,
+      message: "Pinned Gemma2 full WebGPU forward passed",
+      diagnostics,
+      validationErrors: [],
+    };
+    status.textContent = JSON.stringify(window.webgpuTest, null, 2);
+  } catch (error) {
+    const message = error instanceof Error ? error.stack ?? String(error) : String(error);
+    window.webgpuTest = {
+      ...window.webgpuTest,
+      done: true,
+      ok: false,
+      message,
+    };
+    status.textContent = message;
+    console.error(message);
+  }
+</script>

@@ -1,0 +1,9 @@
+# Model-only browser acceptance milestone. These are unchanged upstream,
+# pure-Python wheels. Runtime tests load their remaining dependencies from the
+# pinned Pyodide 314.0.2 lock and intentionally do not install tokenizers.
+filelock==3.32.0 \
+    --hash=sha256:d396bea984af47333ef05e50eae7eff88c84256de6112aea0ec48a233c064fe3
+huggingface-hub==0.26.2 \
+    --hash=sha256:98c2a5a8e786c7b2cb6fdeb2740893cba4d53e312572ed3d8afafda65b128c46
+transformers==4.46.3 \
+    --hash=sha256:a12ef6f52841fd190a3e5602145b542d03507222f2c64ebb7ee92e8788093aef

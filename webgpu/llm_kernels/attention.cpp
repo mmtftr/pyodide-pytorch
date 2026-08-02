@@ -80,12 +80,12 @@ at::Tensor sdpa_impl(
       "WebGPU SDPA key/value sequence mismatch");
   TORCH_CHECK(query.size(3) == key.size(3) && key.size(3) == value.size(3),
       "WebGPU SDPA head dimension mismatch");
+  TORCH_CHECK(query.size(0) > 0 && query.size(1) > 0 && key.size(1) > 0,
+      "WebGPU SDPA does not support empty batch or head dimensions");
   TORCH_CHECK(query.size(1) % key.size(1) == 0,
       "WebGPU SDPA query heads must be divisible by key/value heads");
   TORCH_CHECK(query.size(1) == key.size(1) || enable_gqa,
       "WebGPU SDPA requires enable_gqa=True when head counts differ");
-  TORCH_CHECK(!causal || key.size(2) >= query.size(2),
-      "WebGPU causal SDPA requires key length >= query length");
   TORCH_CHECK(query.size(2) > 0 && key.size(2) > 0 && query.size(3) > 0,
       "WebGPU SDPA does not support empty attention dimensions");
 

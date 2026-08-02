@@ -1,5 +1,13 @@
-# Keep PEP 517's isolated environment on the same tested host toolchain.
+# Complete PEP 517 build requirements. These are installed into the stable
+# host environment because a fresh /tmp/build-env-* path invalidates CMake and
+# ccache state on every incremental build.
 cmake==3.27.9
 ninja==1.13.0
 numpy==2.4.3
+packaging==26.2
+pyyaml==6.0.3
+requests==2.34.2
+setuptools==81.0.0
+six==1.17.0
+typing-extensions==4.16.0
 wheel==0.47.0

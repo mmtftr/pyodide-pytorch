@@ -32,17 +32,24 @@ function safeError(error) {
   return `${detail.slice(0, MAX_ERROR_CHARACTERS)}… [truncated]`;
 }
 
-const [wheelArgument, filelockArgument, pyodideArgument] =
+const [wheelArgument, filelockArgument, pyodideArgument, pageArgument] =
   process.argv.slice(2);
 if (!wheelArgument || !filelockArgument || !pyodideArgument) {
   throw new Error(
-    "usage: node tests/webgpu.mjs WHEEL FILELOCK_WHEEL PYODIDE_DIST",
+    "usage: node tests/webgpu.mjs WHEEL FILELOCK_WHEEL PYODIDE_DIST [TEST_PAGE]",
   );
 }
 const wheel = path.resolve(wheelArgument);
 const filelockWheel = path.resolve(filelockArgument);
 const pyodideDirectory = path.resolve(pyodideArgument);
+const testPage = pageArgument
+  ? path.resolve(pageArgument)
+  : path.join(scriptDirectory, "webgpu.html");
 const pyodideLock = path.join(pyodideDirectory, "pyodide-lock.json");
+const adapterMode = process.env.WEBGPU_ADAPTER ?? "swiftshader";
+if (!new Set(["hardware", "swiftshader"]).has(adapterMode)) {
+  throw new Error(`unsupported WEBGPU_ADAPTER mode: ${adapterMode}`);
+}
 const chrome = existingFile([
   process.env.CHROME_PATH,
   "/usr/bin/google-chrome",
@@ -55,6 +62,7 @@ for (const [label, filename] of [
   ["filelock wheel", filelockWheel],
   ["Pyodide package", path.join(pyodideDirectory, "pyodide.mjs")],
   ["Pyodide lock file", pyodideLock],
+  ["test page", testPage],
   ["Chrome", chrome],
 ]) {
   if (!filename || !fs.existsSync(filename)) {
@@ -108,7 +116,7 @@ const contentTypes = new Map([
   [".zip", "application/zip"],
 ]);
 const routes = new Map([
-  ["/", path.join(scriptDirectory, "webgpu.html")],
+  ["/", testPage],
   [`/dependency/${path.basename(filelockWheel)}`, filelockWheel],
   [`/wheel/${path.basename(wheel)}`, wheel],
 ]);
@@ -139,20 +147,25 @@ let browser;
 try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
+  const browserArguments = [
+    "--no-sandbox",
+    "--enable-unsafe-webgpu",
+    "--enable-dawn-features=allow_unsafe_apis",
+    "--disable-dawn-features=use_dxc",
+    "--enable-webgpu-developer-features",
+    "--use-gpu-in-tests",
+    "--enable-accelerated-2d-canvas",
+  ];
+  if (adapterMode === "swiftshader") {
+    browserArguments.push(
+      "--enable-unsafe-swiftshader",
+      "--use-webgpu-adapter=swiftshader",
+    );
+  }
   browser = await puppeteer.launch({
     executablePath: chrome,
     headless: true,
-    args: [
-      "--no-sandbox",
-      "--enable-unsafe-webgpu",
-      "--enable-unsafe-swiftshader",
-      "--use-webgpu-adapter=swiftshader",
-      "--enable-dawn-features=allow_unsafe_apis",
-      "--disable-dawn-features=use_dxc",
-      "--enable-webgpu-developer-features",
-      "--use-gpu-in-tests",
-      "--enable-accelerated-2d-canvas",
-    ],
+    args: browserArguments,
   });
   const page = await browser.newPage();
   page.on("console", (message) => {
@@ -164,6 +177,10 @@ try {
   const parameters = new URLSearchParams({
     wheel: path.basename(wheel),
     filelock: path.basename(filelockWheel),
+    adapter: adapterMode,
+    timestamps: process.env.WEBGPU_TIMESTAMPS ?? "0",
+    extended: process.env.WEBGPU_EXTENDED ?? "0",
+    batch: process.env.WEBGPU_BATCH ?? "0",
   });
   await page.goto(
     `http://127.0.0.1:${address.port}/?${parameters.toString()}`,

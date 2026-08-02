@@ -15,6 +15,8 @@ on:
       - "scripts/**"
       - "site/**"
       - "tests/**"
+      - "vendor/**"
+      - "webgpu/**"
       - ".github/workflows/**"
 
 permissions:

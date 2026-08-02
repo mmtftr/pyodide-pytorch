@@ -30,16 +30,24 @@ async function runStage(name, operation) {
 }
 
 async function main() {
-  const [wheelArgument, expectedVersion, expectedCommit] = process.argv.slice(2);
+  const [wheelArgument, expectedVersion, expectedCommit, filelockArgument] =
+    process.argv.slice(2);
   if (!wheelArgument || !expectedVersion || !expectedCommit) {
     throw new Error(
-      "usage: node tests/smoke.mjs WHEEL EXPECTED_VERSION EXPECTED_COMMIT",
+      "usage: node tests/smoke.mjs WHEEL EXPECTED_VERSION EXPECTED_COMMIT FILELOCK_WHEEL",
     );
   }
 
   wheel = path.resolve(wheelArgument);
   if (!fs.existsSync(wheel)) {
     throw new Error(`wheel does not exist: ${wheel}`);
+  }
+  if (!filelockArgument) {
+    throw new Error("the pinned filelock wheel is required");
+  }
+  const filelockWheel = path.resolve(filelockArgument);
+  if (!fs.existsSync(filelockWheel)) {
+    throw new Error(`filelock wheel does not exist: ${filelockWheel}`);
   }
   wheelBytes = fs.statSync(wheel).size;
   console.log(
@@ -59,20 +67,21 @@ async function main() {
 
   await runStage("load runtime dependencies", () =>
     pyodide.loadPackage([
-      "micropip",
       "numpy",
       "typing-extensions",
       "sympy",
       "networkx",
       "jinja2",
       "fsspec",
+      "pyyaml",
+      "regex",
+      "requests",
+      "safetensors",
+      "tqdm",
     ]),
   );
   await runStage("install pinned filelock", () =>
-    pyodide.runPythonAsync(`
-import micropip
-await micropip.install("filelock==3.32.0")
-`),
+    pyodide.loadPackage(filelockWheel),
   );
   await runStage("load torch wheel", () => pyodide.loadPackage(wheel));
 

@@ -51,6 +51,7 @@ def main() -> int:
         },
         "inputs": {
             "build_script_sha256": sha256(ROOT / "scripts" / "build_wheel.sh"),
+            "cmake_hooks_tree_sha256": tree_sha256(ROOT / "scripts" / "cmake"),
             "staging_script_sha256": sha256(
                 ROOT / "scripts" / "stage_webgpu_sources.py"
             ),

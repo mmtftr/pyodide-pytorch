@@ -33,7 +33,13 @@
     if (adapter === null) {
       throw new Error("requestAdapter returned null");
     }
-    const device = await adapter.requestDevice();
+    const adapterInfo = adapter.info ?? {};
+    const fixed32Subgroups =
+      adapter.features.has("subgroups") &&
+      adapterInfo.subgroupMinSize === 32 &&
+      adapterInfo.subgroupMaxSize === 32;
+    const requiredFeatures = fixed32Subgroups ? ["subgroups"] : [];
+    const device = await adapter.requestDevice({ requiredFeatures });
     device.pushErrorScope("validation");
     device.addEventListener("uncapturederror", (event) => {
       const message = event.error?.message ?? String(event.error);
@@ -42,10 +48,13 @@
     });
     window.webgpuTestDevice = device;
     window.webgpuTest.adapter = {
-      architecture: adapter.info?.architecture ?? "",
-      description: adapter.info?.description ?? "",
-      device: adapter.info?.device ?? "",
-      vendor: adapter.info?.vendor ?? "",
+      architecture: adapterInfo.architecture ?? "",
+      description: adapterInfo.description ?? "",
+      device: adapterInfo.device ?? "",
+      vendor: adapterInfo.vendor ?? "",
+      subgroups: device.features.has("subgroups"),
+      subgroupMinSize: adapterInfo.subgroupMinSize ?? null,
+      subgroupMaxSize: adapterInfo.subgroupMaxSize ?? null,
     };
     report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
 
@@ -75,6 +84,68 @@ await torch.webgpu.init(device=js.webgpuTestDevice)
 
 x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32).to("webgpu")
 y = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32).to("webgpu")
+
+# PrivateUse1 _to_copy is selected for CPU -> WebGPU .to(...) as well as
+# same-device casts. Keep ordinary Float/Int/restricted-Long uploads on the
+# backend's checked copy path.
+cpu_upload_float_source = torch.tensor([-9.0, 1.25, -2.5, 7.75])[1:]
+cpu_upload_int_source = torch.tensor([-7, 0, 11], dtype=torch.int32)
+cpu_upload_long_source = torch.tensor(
+    [-2147483648, -1, 0, 2147483647], dtype=torch.int64
+)
+cpu_upload_bool_source = torch.tensor(
+    [True, False, True, True, False, False, True], dtype=torch.bool
+)
+cpu_upload_float = cpu_upload_float_source.to("webgpu")
+cpu_upload_int = cpu_upload_int_source.to("webgpu")
+cpu_upload_long = cpu_upload_long_source.to("webgpu")
+cpu_upload_bool = cpu_upload_bool_source.to("webgpu")
+cpu_upload_noncontiguous_source = torch.arange(
+    12, dtype=torch.float32
+).reshape(3, 4).t()
+try:
+    cpu_upload_noncontiguous_source.to("webgpu")
+except RuntimeError as error:
+    assert "contiguous input for preserve_format" in str(error)
+else:
+    raise AssertionError("noncontiguous preserve-format CPU upload unexpectedly succeeded")
+cpu_upload_contiguous = cpu_upload_noncontiguous_source.to(
+    "webgpu", memory_format=torch.contiguous_format
+)
+
+# Bool keeps ATen's one-byte storage contract. Exercise an odd-sized upload
+# and readback, byte-offset readback, fill, strided clone, same-dtype _to_copy,
+# aligned direct copy_, Long eq.Scalar, Bool all, and JSPI truth extraction.
+bool_slice = cpu_upload_bool[1:6]
+bool_strided_view = cpu_upload_bool[1:6:2]
+long_strided_view = cpu_upload_long[1::2]
+bool_strided_clone = cpu_upload_bool[::2].clone()
+bool_same_dtype_copy = cpu_upload_bool.to(
+    dtype=torch.bool,
+    copy=True,
+    memory_format=torch.contiguous_format,
+)
+bool_filled_true = torch.full((7,), True, dtype=torch.bool, device="webgpu")
+bool_filled_false = torch.full((5,), False, dtype=torch.bool, device="webgpu")
+bool_direct_source = torch.tensor(
+    [True, False, True, False, False, True, False, True], dtype=torch.bool
+).to("webgpu")
+bool_direct_copy = torch.empty_like(bool_direct_source)
+bool_direct_copy.copy_(bool_direct_source)
+comparison_input_cpu = torch.tensor(
+    [[1, 1, 1, 1], [1, 1, 1, 1]], dtype=torch.long
+)
+comparison_true = comparison_input_cpu.to("webgpu") == 1
+comparison_false = comparison_input_cpu.to("webgpu") == 0
+comparison_all_true = torch.all(comparison_true)
+comparison_all_false = torch.all(comparison_false)
+empty_bool_all = torch.all(
+    torch.empty((0,), dtype=torch.bool, device="webgpu")
+)
+assert bool(comparison_all_true)
+assert not bool(comparison_all_false)
+assert bool(empty_bool_all)
+
 added = x + y
 multiplied = x * y
 broadcast = torch.add(
@@ -82,12 +153,48 @@ broadcast = torch.add(
     torch.tensor([[10.0, 20.0, 30.0]]).to("webgpu"),
     alpha=2,
 )
+
+# Scalar arithmetic stays on the GPU: it must not synthesize a CPU scalar
+# tensor and accidentally enter the Tensor overload. Cover all four real
+# float32 overloads, alpha, strided input/output, and the alias-safe temporary
+# path used by scalar in-place and tensor in-place operations.
+scalar_backing_cpu = torch.linspace(-3.0, 3.0, 24).reshape(3, 8)
+scalar_input_cpu = scalar_backing_cpu[1:, 1:7:2]
+scalar_input = scalar_backing_cpu.to("webgpu")[1:, 1:7:2]
+scalar_add = torch.ops.aten.add.Scalar(scalar_input, 1e-6, alpha=1)
+scalar_sub = torch.ops.aten.sub.Scalar(scalar_input, 0.75, alpha=2)
+scalar_mul = torch.ops.aten.mul.Scalar(scalar_input, -3.0)
+scalar_div = torch.ops.aten.div.Scalar(scalar_input, 2.5)
+scalar_out = torch.empty((3, 2), device="webgpu").t()
+torch.ops.aten.add.Scalar_out(
+    scalar_input, 4.0, alpha=-0.25, out=scalar_out
+)
+
+scalar_inplace_backing = scalar_backing_cpu.to("webgpu")
+scalar_inplace = scalar_inplace_backing[1:, 1:7:2]
+torch.ops.aten.add_.Scalar(scalar_inplace, 2.0, alpha=0.5)
+torch.ops.aten.sub_.Scalar(scalar_inplace, 0.25, alpha=2)
+torch.ops.aten.mul_.Scalar(scalar_inplace, -4.0)
+torch.ops.aten.div_.Scalar(scalar_inplace, 2.0)
+
+tensor_inplace_rhs_cpu = torch.linspace(0.5, 1.0, 6).reshape(2, 3)
+tensor_inplace_backing = scalar_backing_cpu.to("webgpu")
+tensor_inplace = tensor_inplace_backing[1:, 1:7:2]
+tensor_inplace.mul_(tensor_inplace_rhs_cpu.to("webgpu"))
 view_base = torch.tensor([1.0, 2.0, 3.0, 4.0]).to("webgpu")
 sliced = view_base[1:]
 strided = view_base[::2]
 strided_doubled = strided + strided
 transposed = view_base.view(2, 2).transpose(0, 1)
 transposed_doubled = transposed + transposed
+# A preallocated-cache prefix has holes between heads because its storage
+# retains the capacity-sized sequence stride. Read it back directly so the
+# public API, rather than the acceptance test, owns GPU materialization.
+readback_prefix_storage_cpu = torch.arange(
+    40, dtype=torch.float32
+).reshape(1, 2, 5, 4)
+readback_prefix_storage = readback_prefix_storage_cpu.to("webgpu")
+readback_prefix = readback_prefix_storage.narrow(2, 0, 3)
 cloned = added.clone()
 copied = torch.empty_like(x)
 copied.copy_(x)
@@ -106,14 +213,281 @@ softmax_result = torch.softmax(
     dim=-1,
 )
 
-# Project-owned decoder-inference kernels. Token IDs intentionally use int32:
-# int64 storage is outside this first browser profile.
+linear_input_cpu = torch.linspace(-1.0, 1.0, 24).reshape(2, 3, 4)
+linear_weight_storage_cpu = torch.linspace(-0.7, 0.8, 20).reshape(4, 5)
+linear_weight_cpu = linear_weight_storage_cpu.t()
+linear_bias_cpu = torch.linspace(-0.2, 0.2, 5)
+linear_weight = linear_weight_storage_cpu.to("webgpu").t()
+linear_result = F.linear(
+    linear_input_cpu.to("webgpu"),
+    linear_weight,
+    linear_bias_cpu.to("webgpu"),
+)
+linear_compile_count = torch.webgpu.shader_compilations()
+linear_no_bias_input_cpu = torch.tensor([-0.5, 0.25, 1.0, -1.5])
+linear_no_bias_result = F.linear(
+    linear_no_bias_input_cpu.to("webgpu"),
+    linear_weight,
+)
+assert torch.webgpu.shader_compilations() == linear_compile_count
+linear_rank1_bias_result = F.linear(
+    linear_no_bias_input_cpu.to("webgpu"),
+    linear_weight,
+    linear_bias_cpu.to("webgpu"),
+)
+
+linear_view_backing_cpu = torch.linspace(-0.9, 0.9, 48).reshape(4, 3, 4)
+linear_view_cpu = linear_view_backing_cpu[1:3].transpose(0, 1)
+linear_bias_backing_cpu = torch.linspace(-0.3, 0.3, 7)
+linear_bias_view_cpu = linear_bias_backing_cpu[1:6]
+linear_view = linear_view_backing_cpu.to("webgpu")[1:3].transpose(0, 1)
+linear_bias_view = linear_bias_backing_cpu.to("webgpu")[1:6]
+linear_view_result = F.linear(linear_view, linear_weight, linear_bias_view)
+
+empty_linear_input_cpu = torch.empty((2, 0), dtype=torch.float32)
+empty_linear_weight_cpu = torch.empty((5, 0), dtype=torch.float32)
+empty_linear_bias_cpu = torch.linspace(-0.4, 0.4, 5)
+empty_linear_result = F.linear(
+    empty_linear_input_cpu.to("webgpu"),
+    empty_linear_weight_cpu.to("webgpu"),
+    empty_linear_bias_cpu.to("webgpu"),
+)
+empty_linear_no_bias_result = F.linear(
+    empty_linear_input_cpu.to("webgpu"),
+    empty_linear_weight_cpu.to("webgpu"),
+)
+
+# Contiguous M=1 with N/K tails exercises the GEMV fast path's bounds checks.
+# The multi-tile GEMM shape exercises the register-blocked contiguous path;
+# nearby strided/tail shapes above continue to cover the generic kernel.
+linear_gemv_input_backing_cpu = (
+    torch.arange(260, dtype=torch.float32) % 19 - 9
+) * 0.01
+linear_gemv_weight_backing_cpu = (
+    (torch.arange(71 * 259, dtype=torch.float32) % 23 - 11) * 0.002
+).reshape(71, 259)
+linear_gemv_bias_backing_cpu = (
+    torch.arange(72, dtype=torch.float32) % 13 - 6
+) * 0.003
+linear_gemv_input_cpu = linear_gemv_input_backing_cpu[1:]
+linear_gemv_weight_cpu = linear_gemv_weight_backing_cpu[1:]
+linear_gemv_bias_cpu = linear_gemv_bias_backing_cpu[1:71]
+linear_gemv_result = F.linear(
+    linear_gemv_input_backing_cpu.to("webgpu")[1:],
+    linear_gemv_weight_backing_cpu.to("webgpu")[1:],
+    linear_gemv_bias_backing_cpu.to("webgpu")[1:71],
+)
+linear_gemm_input_backing_cpu = (
+    (torch.arange(33 * 32, dtype=torch.float32) % 29 - 14) * 0.004
+).reshape(33, 32)
+linear_gemm_weight_backing_cpu = (
+    (torch.arange(65 * 32, dtype=torch.float32) % 31 - 15) * 0.001
+).reshape(65, 32)
+linear_gemm_input_cpu = linear_gemm_input_backing_cpu[1:]
+linear_gemm_weight_cpu = linear_gemm_weight_backing_cpu[1:]
+linear_gemm_result = F.linear(
+    linear_gemm_input_backing_cpu.to("webgpu")[1:],
+    linear_gemm_weight_backing_cpu.to("webgpu")[1:],
+)
+
+# The packed Q8 path is deliberately decode-only and requires fixed SIMD32
+# subgroups. Build its versioned group-128 representation on CPU, then either
+# execute it on supported hardware or prove that unsupported adapters fail
+# closed instead of silently dequantizing/falling back.
+q8_input_cpu = torch.linspace(-0.75, 0.75, 256, dtype=torch.float32)
+q8_weight_cpu = (
+    (torch.arange(7 * 256, dtype=torch.float32) % 61) - 30
+).reshape(7, 256) * 0.001
+q8_bias_cpu = torch.linspace(-0.02, 0.02, 7, dtype=torch.float32)
+q8_grouped = q8_weight_cpu.reshape(7, 2, 128)
+q8_scales_cpu = q8_grouped.abs().amax(dim=-1)
+q8_safe_scales = torch.where(
+    q8_scales_cpu == 0,
+    torch.ones_like(q8_scales_cpu),
+    q8_scales_cpu,
+)
+q8_values = torch.round(
+    q8_grouped * (127.0 / q8_safe_scales.unsqueeze(-1))
+).clamp(-127, 127).to(torch.int32)
+q8_bytes = q8_values & 0xFF
+q8_packed_cpu = (
+    q8_bytes[..., 0::4]
+    | (q8_bytes[..., 1::4] << 8)
+    | (q8_bytes[..., 2::4] << 16)
+    | (q8_bytes[..., 3::4] << 24)
+).reshape(7, 64).contiguous()
+q8_dequantized_weight_cpu = (
+    q8_values.to(torch.float32) / 127.0 * q8_scales_cpu.unsqueeze(-1)
+).reshape(7, 256)
+q8_input = q8_input_cpu.to("webgpu")
+q8_packed = q8_packed_cpu.to("webgpu")
+q8_scales = q8_scales_cpu.to("webgpu")
+q8_bias = q8_bias_cpu.to("webgpu")
+q8_supported = bool(
+    js.webgpuTest.adapter.subgroups
+    and js.webgpuTest.adapter.subgroupMinSize == 32
+    and js.webgpuTest.adapter.subgroupMaxSize == 32
+)
+q8_result = None
+if q8_supported:
+    q8_result = torch.ops.webgpu.q8_linear(
+        q8_input, q8_packed, q8_scales, q8_bias, 128, 1
+    )
+else:
+    try:
+        torch.ops.webgpu.q8_linear(
+            q8_input, q8_packed, q8_scales, q8_bias, 128, 1
+        )
+    except RuntimeError as error:
+        assert "fixed-size-32 WebGPU subgroup" in str(error)
+    else:
+        raise AssertionError("Q8 linear unexpectedly ran without SIMD32 subgroups")
+
+# Project-owned decoder-inference kernels accept native int32 indices and the
+# signed-int32-valued subset of real 8-byte torch.int64 storage.
 token_ids_cpu = torch.tensor([[0, 2, 4], [1, 3, 5]], dtype=torch.int32)
+long_token_ids_cpu = token_ids_cpu.long()
 embedding_weight_cpu = torch.arange(48, dtype=torch.float32).reshape(6, 8) / 10
 token_ids = token_ids_cpu.to("webgpu")
+long_token_ids = long_token_ids_cpu.to("webgpu")
 embedding_weight = embedding_weight_cpu.to("webgpu")
 embedding_result = F.embedding(token_ids, embedding_weight)
+long_embedding_result = F.embedding(long_token_ids, embedding_weight)
 token_ids_roundtrip = await torch.webgpu.to_cpu_async(token_ids)
+long_token_ids_roundtrip = await torch.webgpu.to_cpu_async(long_token_ids)
+
+long_arange = torch.arange(-7, 8, 3, device="webgpu")
+long_reverse_arange = torch.arange(7, -8, -3, device="webgpu")
+int_arange = torch.arange(2, 11, 2, dtype=torch.int32, device="webgpu")
+long_full = torch.full((2, 3), -17, dtype=torch.long, device="webgpu")
+long_ones = long_token_ids.new_ones((2, 2))
+long_noncontiguous = long_token_ids.t()
+long_contiguous = long_noncontiguous.contiguous()
+long_cat = torch.cat((long_contiguous, long_contiguous), dim=1)
+generation_long_cpu = torch.tensor(
+    [[0, 1, 1, 2], [-3, 0, 4, 4]], dtype=torch.long
+)
+generation_long = generation_long_cpu.to("webgpu")
+generation_cumsum = torch.cumsum(generation_long, dim=-1)
+generation_test_backing_cpu = torch.tensor(
+    [99, -3, 98, 4], dtype=torch.long
+)
+generation_test_cpu = generation_test_backing_cpu[1::2]
+generation_test = generation_test_backing_cpu.to("webgpu")[1::2]
+generation_elements = generation_long[:, ::2]
+generation_isin = torch.isin(generation_elements, generation_test)
+generation_isin_inverted = torch.isin(
+    generation_elements,
+    generation_test,
+    invert=True,
+)
+generation_negative = generation_long < 0
+generation_any_negative = torch.any(generation_negative)
+generation_not_negative = torch.bitwise_not(generation_negative)
+generation_not_any_negative = torch.bitwise_not(generation_any_negative)
+generation_bool_product = generation_negative * generation_not_negative
+generation_bool_scalar_product = (
+    generation_any_negative * generation_not_any_negative
+)
+generation_bool_broadcast_product = (
+    generation_negative[:, :1] * generation_not_negative
+)
+generation_pad_token = torch.tensor(0, dtype=torch.long).to("webgpu")
+generation_not_padding = generation_long.ne(generation_pad_token)
+# Transformers 4.46.3 performs this exact chained conversion when it builds
+# the decoder attention mask from input_ids and a tensor pad_token_id.
+generation_attention_mask = generation_long.ne(generation_pad_token).long()
+generation_strided_bool_long = generation_negative[1:, 1::2].long()
+generation_scalar_bool_long = generation_any_negative.long()
+generation_expanded_bool_long = generation_any_negative.expand(2, 3).long()
+generation_empty_bool_long = generation_negative[:, :0].long()
+assert generation_attention_mask.dtype is torch.int64
+assert generation_attention_mask.is_contiguous()
+assert generation_strided_bool_long.is_contiguous()
+assert torch.ops.webgpu.buffer_nbytes(generation_attention_mask) == (
+    generation_attention_mask.numel() * 8
+)
+generation_int_cpu = generation_long_cpu.to(torch.int32)
+generation_int = generation_int_cpu.to("webgpu")
+generation_int_not_padding = generation_int.ne(generation_pad_token)
+generation_ne_broadcast = generation_elements.ne(generation_test)
+cache_states_cpu = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
+dynamic_cache_append = torch.cat(
+    (
+        torch.tensor([], dtype=torch.float32, device="webgpu"),
+        cache_states_cpu.to("webgpu"),
+    ),
+    dim=-2,
+)
+
+# A paired indexed cache write replaces four DynamicCache copy dispatches.
+# Cover two updates, both position dtypes, and valid-prefix storage contents.
+kv_key_cache = torch.zeros((1, 2, 5, 4), device="webgpu")
+kv_value_cache = torch.zeros((1, 2, 5, 4), device="webgpu")
+kv_key_states_cpu = torch.arange(16, dtype=torch.float32).reshape(1, 2, 2, 4)
+kv_value_states_cpu = -kv_key_states_cpu - 0.5
+kv_positions_cpu = torch.tensor([1, 3], dtype=torch.int32)
+torch.ops.webgpu.update_kv_cache_(
+    kv_key_cache,
+    kv_value_cache,
+    kv_key_states_cpu.to("webgpu"),
+    kv_value_states_cpu.to("webgpu"),
+    kv_positions_cpu.to("webgpu"),
+)
+kv_tail_key_cpu = torch.full((1, 2, 1, 4), 17.0)
+kv_tail_value_cpu = torch.full((1, 2, 1, 4), -19.0)
+torch.ops.webgpu.update_kv_cache_(
+    kv_key_cache,
+    kv_value_cache,
+    kv_tail_key_cpu.to("webgpu"),
+    kv_tail_value_cpu.to("webgpu"),
+    torch.tensor([4], dtype=torch.long).to("webgpu"),
+)
+kv_key_reference = torch.zeros((1, 2, 5, 4))
+kv_value_reference = torch.zeros((1, 2, 5, 4))
+kv_key_reference[:, :, kv_positions_cpu.long(), :] = kv_key_states_cpu
+kv_value_reference[:, :, kv_positions_cpu.long(), :] = kv_value_states_cpu
+kv_key_reference[:, :, 4:5, :] = kv_tail_key_cpu
+kv_value_reference[:, :, 4:5, :] = kv_tail_value_cpu
+
+# Greedy decoding reduces float32 vocabulary logits over their last
+# dimension. Exercise a storage-offset/non-unit-stride view, a reduction tail
+# beyond one workgroup, first-index tie breaking, ATen's NaN precedence,
+# keepdim, and direct consumption of the canonical Long result by embedding.
+argmax_backing_cpu = (
+    (torch.arange(5 * 523, dtype=torch.float32) % 97) - 48
+).reshape(5, 523)
+argmax_input_cpu = argmax_backing_cpu[1:, 2:520:2]
+argmax_input_cpu[0, 3] = 1000.0
+argmax_input_cpu[0, 257] = 1000.0
+argmax_input_cpu[1, 5] = float("nan")
+argmax_input_cpu[1, 17] = float("nan")
+argmax_input_cpu[2, 2] = 2000.0
+argmax_input_cpu[3].fill_(-4.0)
+argmax_input = argmax_backing_cpu.to("webgpu")[1:, 2:520:2]
+argmax_result = torch.argmax(argmax_input, dim=-1)
+argmax_keepdim_result = torch.argmax(argmax_input, dim=1, keepdim=True)
+argmax_embedding_result = F.embedding(argmax_result, embedding_weight)
+assert argmax_result.dtype is torch.int64
+try:
+    torch.argmax(argmax_input, dim=0)
+except RuntimeError as error:
+    assert "only the last dimension" in str(error)
+else:
+    raise AssertionError("non-last WebGPU argmax unexpectedly succeeded")
+try:
+    torch.argmax(argmax_input)
+except RuntimeError as error:
+    assert "explicit last-dimension" in str(error)
+else:
+    raise AssertionError("dimensionless WebGPU argmax unexpectedly succeeded")
+
+try:
+    torch.tensor([2**31], dtype=torch.long).to("webgpu")
+except RuntimeError as error:
+    assert "signed-int32 values" in str(error)
+else:
+    raise AssertionError("out-of-profile torch.int64 upload unexpectedly succeeded")
 
 noncontiguous = torch.arange(12, dtype=torch.float32).reshape(3, 4).to("webgpu").t()
 contiguous_result = noncontiguous.contiguous()
@@ -142,6 +516,162 @@ rms_norm_result = F.rms_norm(
     norm_weight_cpu.to("webgpu"),
     1e-5,
 )
+
+# Exercise the native three-tensor contract used by GPT-2/BERT directly.  The
+# rank-four input and two-dimensional affine weight are noncontiguous, the
+# 518-element normalized suffix crosses the 256-lane reduction tail, and the
+# large common offset distinguishes Welford variance from E[x^2] - E[x]^2.
+stable_norm_backing_cpu = (
+    8192.0
+    + ((torch.arange(2 * 3 * 2 * 259, dtype=torch.float32) * 13) % 29 - 14)
+    * 0.125
+).reshape(2, 3, 2, 259)
+stable_norm_input_cpu = stable_norm_backing_cpu.transpose(0, 1)
+stable_norm_weight_backing_cpu = torch.linspace(0.75, 1.25, 2 * 259).reshape(
+    259, 2
+)
+stable_norm_weight_cpu = stable_norm_weight_backing_cpu.t()
+stable_norm_bias_cpu = torch.linspace(-0.05, 0.05, 2 * 259).reshape(2, 259)
+stable_norm_input = stable_norm_backing_cpu.to("webgpu").transpose(0, 1)
+stable_norm_weight = stable_norm_weight_backing_cpu.to("webgpu").t()
+stable_norm_bias = stable_norm_bias_cpu.to("webgpu")
+stable_norm_diagnostics_before = torch.webgpu.diagnostics()
+with torch.webgpu.batch():
+    stable_norm_result, stable_norm_mean, stable_norm_rstd = (
+        torch.native_layer_norm(
+            stable_norm_input,
+            (2, 259),
+            stable_norm_weight,
+            stable_norm_bias,
+            1e-5,
+        )
+    )
+    stable_norm_diagnostics_pending = torch.webgpu.diagnostics()
+    assert (
+        stable_norm_diagnostics_pending["pending_command_buffers"]
+        - stable_norm_diagnostics_before["pending_command_buffers"]
+        == 3
+    )
+    assert (
+        stable_norm_diagnostics_pending["command_submissions"]
+        == stable_norm_diagnostics_before["command_submissions"]
+    )
+stable_norm_diagnostics_after = torch.webgpu.diagnostics()
+assert (
+    stable_norm_diagnostics_after["command_submissions"]
+    - stable_norm_diagnostics_before["command_submissions"]
+    == 1
+)
+assert (
+    stable_norm_diagnostics_after["command_buffers_submitted"]
+    - stable_norm_diagnostics_before["command_buffers_submitted"]
+    == 3
+)
+assert stable_norm_mean.shape == (3, 2, 1, 1)
+assert stable_norm_rstd.shape == (3, 2, 1, 1)
+
+# Empty prefix rows return an empty output/statistics tuple without a dispatch,
+# but affine validation and the rank bound remain explicit error paths.
+empty_norm_input = torch.empty((0, 2, 259), device="webgpu")
+empty_norm_before = torch.webgpu.diagnostics()["dispatches"]
+empty_norm_result, empty_norm_mean, empty_norm_rstd = torch.native_layer_norm(
+    empty_norm_input,
+    (2, 259),
+    stable_norm_weight,
+    stable_norm_bias,
+    1e-5,
+)
+assert torch.webgpu.diagnostics()["dispatches"] == empty_norm_before
+assert empty_norm_result.shape == (0, 2, 259)
+assert empty_norm_mean.shape == (0, 1, 1)
+assert empty_norm_rstd.shape == (0, 1, 1)
+try:
+    torch.native_layer_norm(
+        empty_norm_input,
+        (2, 259),
+        torch.empty((259,), device="webgpu"),
+        stable_norm_bias,
+        1e-5,
+    )
+except RuntimeError as error:
+    assert "weight shape mismatch" in str(error)
+else:
+    raise AssertionError("empty WebGPU layer_norm skipped affine validation")
+try:
+    torch.native_layer_norm(
+        torch.empty((1,) * 9, device="webgpu"), (1,), None, None, 1e-5
+    )
+except RuntimeError as error:
+    assert "at most 8 dimensions" in str(error)
+else:
+    raise AssertionError("rank-nine WebGPU layer_norm unexpectedly succeeded")
+
+# Stock Transformers 4.46.3 Qwen2/Llama/Mistral RMSNorm reduces the final
+# float32 dimension with keepdim=True. Use a storage-offset view, a 259-wide
+# reduction tail, and a non-final dimension to cover the general index map.
+mean_backing_cpu = (
+    (torch.arange(2 * 4 * 263, dtype=torch.float32) % 37) - 18
+).reshape(2, 4, 263) * 0.025
+mean_input_cpu = mean_backing_cpu[:, 1:4, 2:261]
+mean_input = mean_backing_cpu.to("webgpu")[:, 1:4, 2:261]
+mean_keepdim_result = mean_input.mean(-1, keepdim=True, dtype=torch.float32)
+mean_middle_result = mean_input.mean(1, keepdim=False)
+rms_variance = mean_input.pow(2).mean(-1, keepdim=True)
+# Name the scalar overload explicitly: Python's expression-level promotion can
+# otherwise materialize epsilon as a CPU scalar tensor before dispatch.
+rms_composed_result = mean_input * torch.rsqrt(
+    torch.ops.aten.add.Scalar(rms_variance, 1e-6, alpha=1)
+)
+try:
+    mean_input.mean((1, 2))
+except RuntimeError as error:
+    assert "exactly one reduction dimension" in str(error)
+else:
+    raise AssertionError("multi-dimension WebGPU mean unexpectedly succeeded")
+
+# Rotary embeddings convert position IDs with .float(). Exercise int32 and
+# the range-limited Long representation, including signed values, offsets,
+# non-unit strides, a dispatch tail, and Preserve-format dense strides.
+int_cast_backing_cpu = (
+    torch.arange(2 * 131, dtype=torch.int32).reshape(2, 131) - 97
+)
+int_cast_source_cpu = int_cast_backing_cpu[:, 1:130:2]
+int_cast_source = int_cast_backing_cpu.to("webgpu")[:, 1:130:2]
+int_cast_result = int_cast_source.float()
+dense_cast_backing_cpu = torch.arange(15, dtype=torch.int32).reshape(3, 5)
+dense_cast_source_cpu = dense_cast_backing_cpu.t()
+dense_cast_source = dense_cast_backing_cpu.to("webgpu").t()
+dense_cast_result = dense_cast_source.float()
+long_cast_backing_cpu = torch.tensor(
+    [[
+        123,
+        -2147483648,
+        124,
+        -16777217,
+        125,
+        -1,
+        126,
+        0,
+        127,
+        16777217,
+        128,
+        2147483647,
+    ]],
+    dtype=torch.int64,
+)
+long_cast_source_cpu = long_cast_backing_cpu[:, 1::2]
+long_cast_result = long_cast_backing_cpu.to("webgpu")[:, 1::2].float()
+same_dtype_copy = mean_input.to(
+    dtype=torch.float32,
+    copy=True,
+    memory_format=torch.contiguous_format,
+)
+try:
+    int_cast_source.to(torch.float64)
+except RuntimeError as error:
+    assert "int32/torch.int64 to torch.float32" in str(error)
+else:
+    raise AssertionError("unsupported WebGPU float64 cast unexpectedly succeeded")
 
 # Validate GQA and PyTorch's upper-left causal contract for a rectangular
 # query/key score matrix.
@@ -244,11 +774,76 @@ with torch.no_grad():
     }
     decoder_ids = decoder_ids_cpu.to("webgpu")
     decoder_positions = position_ids_cpu.to("webgpu")
-    decoder_logits = decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+    decoder_diagnostics_before = torch.webgpu.diagnostics()
+    with torch.webgpu.batch():
+        with torch.webgpu.batch():
+            decoder_logits = decoder_block(
+                decoder_ids, decoder_positions, decoder_gpu_parameters
+            )
+        decoder_diagnostics_nested_exit = torch.webgpu.diagnostics()
+        assert decoder_diagnostics_nested_exit["batch_depth"] == 1
+        assert decoder_diagnostics_nested_exit["pending_command_buffers"] == 15
+        assert (
+            decoder_diagnostics_nested_exit["command_submissions"]
+            == decoder_diagnostics_before["command_submissions"]
+        )
+    decoder_diagnostics_after = torch.webgpu.diagnostics()
+    decoder_dispatches = (
+        decoder_diagnostics_after["dispatches"]
+        - decoder_diagnostics_before["dispatches"]
+    )
+    decoder_buffer_allocations = (
+        decoder_diagnostics_after["buffer_allocations"]
+        - decoder_diagnostics_before["buffer_allocations"]
+    )
+    # Every dispatch creates one transient uniform buffer; the remainder are
+    # tensor storage allocations. Track both so a kernel fusion cannot look
+    # like a tensor-allocation regression.
+    decoder_tensor_allocations = decoder_buffer_allocations - decoder_dispatches
+    decoder_command_submissions = (
+        decoder_diagnostics_after["command_submissions"]
+        - decoder_diagnostics_before["command_submissions"]
+    )
+    decoder_command_buffers = (
+        decoder_diagnostics_after["command_buffers_submitted"]
+        - decoder_diagnostics_before["command_buffers_submitted"]
+    )
+    assert decoder_dispatches == 15, decoder_dispatches
+    assert decoder_command_submissions == 1, decoder_command_submissions
+    assert decoder_command_buffers == 15, decoder_command_buffers
+    assert decoder_diagnostics_after["pending_command_buffers"] == 0
+    assert decoder_diagnostics_after["batch_depth"] == 0
+    assert decoder_buffer_allocations == 34, decoder_buffer_allocations
+    assert decoder_tensor_allocations == 19, decoder_tensor_allocations
+cpu_upload_float_cpu = await torch.webgpu.to_cpu_async(cpu_upload_float)
+cpu_upload_int_cpu = await torch.webgpu.to_cpu_async(cpu_upload_int)
+cpu_upload_long_cpu = await torch.webgpu.to_cpu_async(cpu_upload_long)
+cpu_upload_bool_cpu = await torch.webgpu.to_cpu_async(cpu_upload_bool)
+cpu_upload_contiguous_cpu = await torch.webgpu.to_cpu_async(cpu_upload_contiguous)
+bool_slice_cpu = await torch.webgpu.to_cpu_async(bool_slice)
+bool_strided_view_cpu = await torch.webgpu.to_cpu_async(bool_strided_view)
+long_strided_view_cpu = await torch.webgpu.to_cpu_async(long_strided_view)
+bool_strided_clone_cpu = await torch.webgpu.to_cpu_async(bool_strided_clone)
+bool_same_dtype_copy_cpu = await torch.webgpu.to_cpu_async(bool_same_dtype_copy)
+bool_filled_true_cpu = await torch.webgpu.to_cpu_async(bool_filled_true)
+bool_filled_false_cpu = await torch.webgpu.to_cpu_async(bool_filled_false)
+bool_direct_copy_cpu = await torch.webgpu.to_cpu_async(bool_direct_copy)
+comparison_true_cpu = await torch.webgpu.to_cpu_async(comparison_true)
+comparison_false_cpu = await torch.webgpu.to_cpu_async(comparison_false)
 added_cpu = await torch.webgpu.to_cpu_async(added)
 multiplied_cpu = await torch.webgpu.to_cpu_async(multiplied)
 broadcast_cpu = await torch.webgpu.to_cpu_async(broadcast)
+scalar_add_cpu = await torch.webgpu.to_cpu_async(scalar_add)
+scalar_sub_cpu = await torch.webgpu.to_cpu_async(scalar_sub)
+scalar_mul_cpu = await torch.webgpu.to_cpu_async(scalar_mul)
+scalar_div_cpu = await torch.webgpu.to_cpu_async(scalar_div)
+scalar_out_cpu = await torch.webgpu.to_cpu_async(scalar_out)
+scalar_inplace_cpu = await torch.webgpu.to_cpu_async(scalar_inplace)
+tensor_inplace_cpu = await torch.webgpu.to_cpu_async(tensor_inplace)
 sliced_cpu = await torch.webgpu.to_cpu_async(sliced)
+strided_cpu = await torch.webgpu.to_cpu_async(strided)
+transposed_cpu = await torch.webgpu.to_cpu_async(transposed)
+readback_prefix_cpu = await torch.webgpu.to_cpu_async(readback_prefix)
 strided_doubled_cpu = await torch.webgpu.to_cpu_async(strided_doubled)
 transposed_doubled_cpu = await torch.webgpu.to_cpu_async(transposed_doubled)
 cloned_cpu = await torch.webgpu.to_cpu_async(cloned)
@@ -258,13 +853,97 @@ relu_again_cpu = await torch.webgpu.to_cpu_async(relu_again)
 silu_cpu = await torch.webgpu.to_cpu_async(silu_result)
 mm_cpu = await torch.webgpu.to_cpu_async(mm_result)
 softmax_cpu = await torch.webgpu.to_cpu_async(softmax_result)
+linear_cpu = await torch.webgpu.to_cpu_async(linear_result)
+linear_no_bias_cpu = await torch.webgpu.to_cpu_async(linear_no_bias_result)
+linear_rank1_bias_cpu = await torch.webgpu.to_cpu_async(linear_rank1_bias_result)
+linear_view_result_cpu = await torch.webgpu.to_cpu_async(linear_view_result)
+empty_linear_cpu = await torch.webgpu.to_cpu_async(empty_linear_result)
+empty_linear_no_bias_cpu = await torch.webgpu.to_cpu_async(empty_linear_no_bias_result)
+linear_gemv_cpu = await torch.webgpu.to_cpu_async(linear_gemv_result)
+linear_gemm_cpu = await torch.webgpu.to_cpu_async(linear_gemm_result)
+q8_result_cpu = (
+    await torch.webgpu.to_cpu_async(q8_result)
+    if q8_result is not None
+    else None
+)
 embedding_cpu = await torch.webgpu.to_cpu_async(embedding_result)
+long_embedding_cpu = await torch.webgpu.to_cpu_async(long_embedding_result)
+long_arange_cpu = await torch.webgpu.to_cpu_async(long_arange)
+long_reverse_arange_cpu = await torch.webgpu.to_cpu_async(long_reverse_arange)
+int_arange_cpu = await torch.webgpu.to_cpu_async(int_arange)
+long_full_cpu = await torch.webgpu.to_cpu_async(long_full)
+long_ones_cpu = await torch.webgpu.to_cpu_async(long_ones)
+long_cat_cpu = await torch.webgpu.to_cpu_async(long_cat)
+generation_cumsum_cpu = await torch.webgpu.to_cpu_async(generation_cumsum)
+generation_isin_cpu = await torch.webgpu.to_cpu_async(generation_isin)
+generation_isin_inverted_cpu = await torch.webgpu.to_cpu_async(
+    generation_isin_inverted
+)
+generation_negative_cpu = await torch.webgpu.to_cpu_async(generation_negative)
+generation_any_negative_cpu = await torch.webgpu.to_cpu_async(
+    generation_any_negative
+)
+generation_not_negative_cpu = await torch.webgpu.to_cpu_async(
+    generation_not_negative
+)
+generation_not_any_negative_cpu = await torch.webgpu.to_cpu_async(
+    generation_not_any_negative
+)
+generation_bool_product_cpu = await torch.webgpu.to_cpu_async(
+    generation_bool_product
+)
+generation_bool_scalar_product_cpu = await torch.webgpu.to_cpu_async(
+    generation_bool_scalar_product
+)
+generation_bool_broadcast_product_cpu = await torch.webgpu.to_cpu_async(
+    generation_bool_broadcast_product
+)
+generation_not_padding_cpu = await torch.webgpu.to_cpu_async(
+    generation_not_padding
+)
+generation_attention_mask_cpu = await torch.webgpu.to_cpu_async(
+    generation_attention_mask
+)
+generation_strided_bool_long_cpu = await torch.webgpu.to_cpu_async(
+    generation_strided_bool_long
+)
+generation_scalar_bool_long_cpu = await torch.webgpu.to_cpu_async(
+    generation_scalar_bool_long
+)
+generation_expanded_bool_long_cpu = await torch.webgpu.to_cpu_async(
+    generation_expanded_bool_long
+)
+generation_empty_bool_long_cpu = await torch.webgpu.to_cpu_async(
+    generation_empty_bool_long
+)
+generation_int_not_padding_cpu = await torch.webgpu.to_cpu_async(
+    generation_int_not_padding
+)
+generation_ne_broadcast_cpu = await torch.webgpu.to_cpu_async(
+    generation_ne_broadcast
+)
+dynamic_cache_append_cpu = await torch.webgpu.to_cpu_async(dynamic_cache_append)
+kv_key_cache_cpu = await torch.webgpu.to_cpu_async(kv_key_cache)
+kv_value_cache_cpu = await torch.webgpu.to_cpu_async(kv_value_cache)
+argmax_cpu = await torch.webgpu.to_cpu_async(argmax_result)
+argmax_keepdim_cpu = await torch.webgpu.to_cpu_async(argmax_keepdim_result)
+argmax_embedding_cpu = await torch.webgpu.to_cpu_async(argmax_embedding_result)
 contiguous_cpu = await torch.webgpu.to_cpu_async(contiguous_result)
 cat_cpu = await torch.webgpu.to_cpu_async(cat_result)
 bmm_cpu = await torch.webgpu.to_cpu_async(bmm_result)
 matmul_cpu = await torch.webgpu.to_cpu_async(matmul_result)
 layer_norm_cpu = await torch.webgpu.to_cpu_async(layer_norm_result)
+stable_norm_cpu = await torch.webgpu.to_cpu_async(stable_norm_result)
+stable_norm_mean_cpu = await torch.webgpu.to_cpu_async(stable_norm_mean)
+stable_norm_rstd_cpu = await torch.webgpu.to_cpu_async(stable_norm_rstd)
 rms_norm_cpu = await torch.webgpu.to_cpu_async(rms_norm_result)
+mean_keepdim_cpu = await torch.webgpu.to_cpu_async(mean_keepdim_result)
+mean_middle_cpu = await torch.webgpu.to_cpu_async(mean_middle_result)
+rms_composed_cpu = await torch.webgpu.to_cpu_async(rms_composed_result)
+int_cast_cpu = await torch.webgpu.to_cpu_async(int_cast_result)
+dense_cast_cpu = await torch.webgpu.to_cpu_async(dense_cast_result)
+long_cast_cpu = await torch.webgpu.to_cpu_async(long_cast_result)
+same_dtype_copy_cpu = await torch.webgpu.to_cpu_async(same_dtype_copy)
 gqa_cpu = await torch.webgpu.to_cpu_async(gqa_result)
 masked_attention_cpu = await torch.webgpu.to_cpu_async(masked_attention_result)
 rope_cpu = await torch.webgpu.to_cpu_async(rope_result)
@@ -277,6 +956,13 @@ assert torch.ops.webgpu.buffer_id(sliced) == torch.ops.webgpu.buffer_id(view_bas
 assert sliced.storage_offset() == 1
 assert strided.stride() == (2,)
 assert transposed.stride() == (1, 2)
+assert not bool_strided_view.is_contiguous()
+assert not long_strided_view.is_contiguous()
+assert not strided.is_contiguous()
+assert not transposed.is_contiguous()
+assert readback_prefix.shape == (1, 2, 3, 4)
+assert readback_prefix.stride() == (40, 20, 4, 1)
+assert not readback_prefix.is_contiguous()
 sliced.copy_(sliced.detach())
 try:
     view_base[1:].copy_(view_base[:-1])
@@ -285,6 +971,33 @@ except RuntimeError as error:
 else:
     raise AssertionError("overlapping same-buffer WebGPU copy unexpectedly succeeded")
 torch.testing.assert_close(added_cpu, torch.tensor([5.0, 7.0, 9.0]))
+torch.testing.assert_close(cpu_upload_float_cpu, cpu_upload_float_source)
+torch.testing.assert_close(cpu_upload_int_cpu, cpu_upload_int_source)
+torch.testing.assert_close(cpu_upload_long_cpu, cpu_upload_long_source)
+torch.testing.assert_close(cpu_upload_bool_cpu, cpu_upload_bool_source)
+torch.testing.assert_close(
+    cpu_upload_contiguous_cpu,
+    cpu_upload_noncontiguous_source.contiguous(),
+)
+torch.testing.assert_close(bool_slice_cpu, cpu_upload_bool_source[1:6])
+torch.testing.assert_close(
+    bool_strided_view_cpu, cpu_upload_bool_source[1:6:2]
+)
+torch.testing.assert_close(long_strided_view_cpu, cpu_upload_long_source[1::2])
+torch.testing.assert_close(bool_strided_clone_cpu, cpu_upload_bool_source[::2])
+torch.testing.assert_close(bool_same_dtype_copy_cpu, cpu_upload_bool_source)
+torch.testing.assert_close(bool_filled_true_cpu, torch.ones(7, dtype=torch.bool))
+torch.testing.assert_close(bool_filled_false_cpu, torch.zeros(5, dtype=torch.bool))
+torch.testing.assert_close(
+    bool_direct_copy_cpu,
+    torch.tensor([True, False, True, False, False, True, False, True]),
+)
+torch.testing.assert_close(
+    comparison_true_cpu, comparison_input_cpu == 1
+)
+torch.testing.assert_close(
+    comparison_false_cpu, comparison_input_cpu == 0
+)
 torch.testing.assert_close(
     multiplied_cpu,
     torch.tensor([4.0, 10.0, 18.0]),
@@ -293,7 +1006,30 @@ torch.testing.assert_close(
     broadcast_cpu,
     torch.tensor([[21.0, 41.0, 61.0], [22.0, 42.0, 62.0]]),
 )
+torch.testing.assert_close(scalar_add_cpu, scalar_input_cpu + 1e-6)
+torch.testing.assert_close(scalar_sub_cpu, scalar_input_cpu - 1.5)
+torch.testing.assert_close(scalar_mul_cpu, scalar_input_cpu * -3.0)
+torch.testing.assert_close(scalar_div_cpu, scalar_input_cpu / 2.5)
+torch.testing.assert_close(scalar_out_cpu, scalar_input_cpu - 1.0)
+expected_scalar_inplace = scalar_input_cpu.clone()
+expected_scalar_inplace.add_(2.0, alpha=0.5)
+expected_scalar_inplace.sub_(0.25, alpha=2)
+expected_scalar_inplace.mul_(-4.0)
+expected_scalar_inplace.div_(2.0)
+torch.testing.assert_close(scalar_inplace_cpu, expected_scalar_inplace)
+torch.testing.assert_close(
+    tensor_inplace_cpu, scalar_input_cpu * tensor_inplace_rhs_cpu
+)
 torch.testing.assert_close(sliced_cpu, torch.tensor([2.0, 3.0, 4.0]))
+torch.testing.assert_close(strided_cpu, torch.tensor([1.0, 3.0]))
+torch.testing.assert_close(
+    transposed_cpu,
+    torch.tensor([[1.0, 3.0], [2.0, 4.0]]),
+)
+torch.testing.assert_close(
+    readback_prefix_cpu,
+    readback_prefix_storage_cpu[:, :, :3, :],
+)
 torch.testing.assert_close(strided_doubled_cpu, torch.tensor([2.0, 6.0]))
 torch.testing.assert_close(
     transposed_doubled_cpu,
@@ -316,8 +1052,136 @@ torch.testing.assert_close(
     rtol=2e-5,
     atol=2e-6,
 )
+torch.testing.assert_close(
+    linear_cpu,
+    F.linear(linear_input_cpu, linear_weight_cpu, linear_bias_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    linear_no_bias_cpu,
+    F.linear(linear_no_bias_input_cpu, linear_weight_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    linear_rank1_bias_cpu,
+    F.linear(linear_no_bias_input_cpu, linear_weight_cpu, linear_bias_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    linear_view_result_cpu,
+    F.linear(linear_view_cpu, linear_weight_cpu, linear_bias_view_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    empty_linear_cpu,
+    F.linear(empty_linear_input_cpu, empty_linear_weight_cpu, empty_linear_bias_cpu),
+)
+torch.testing.assert_close(
+    empty_linear_no_bias_cpu,
+    F.linear(empty_linear_input_cpu, empty_linear_weight_cpu),
+)
+torch.testing.assert_close(
+    linear_gemv_cpu,
+    F.linear(linear_gemv_input_cpu, linear_gemv_weight_cpu, linear_gemv_bias_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    linear_gemm_cpu,
+    F.linear(linear_gemm_input_cpu, linear_gemm_weight_cpu),
+    rtol=3e-5,
+    atol=3e-6,
+)
+if q8_result_cpu is not None:
+    torch.testing.assert_close(
+        q8_result_cpu,
+        F.linear(q8_input_cpu, q8_dequantized_weight_cpu, q8_bias_cpu),
+        rtol=3e-5,
+        atol=3e-6,
+    )
 torch.testing.assert_close(token_ids_roundtrip, token_ids_cpu)
 torch.testing.assert_close(embedding_cpu, F.embedding(token_ids_cpu, embedding_weight_cpu))
+torch.testing.assert_close(
+    long_embedding_cpu,
+    F.embedding(long_token_ids_cpu, embedding_weight_cpu),
+)
+torch.testing.assert_close(long_token_ids_roundtrip, long_token_ids_cpu)
+assert long_arange.dtype is torch.int64
+torch.testing.assert_close(long_arange_cpu, torch.arange(-7, 8, 3))
+torch.testing.assert_close(long_reverse_arange_cpu, torch.arange(7, -8, -3))
+torch.testing.assert_close(int_arange_cpu, torch.arange(2, 11, 2, dtype=torch.int32))
+torch.testing.assert_close(long_full_cpu, torch.full((2, 3), -17, dtype=torch.long))
+torch.testing.assert_close(long_ones_cpu, torch.ones((2, 2), dtype=torch.long))
+torch.testing.assert_close(
+    long_cat_cpu,
+    torch.cat((long_token_ids_cpu.t(), long_token_ids_cpu.t()), dim=1),
+)
+torch.testing.assert_close(
+    generation_cumsum_cpu,
+    torch.cumsum(generation_long_cpu, dim=-1),
+)
+torch.testing.assert_close(
+    generation_isin_cpu,
+    torch.isin(generation_long_cpu[:, ::2], generation_test_cpu),
+)
+torch.testing.assert_close(
+    generation_isin_inverted_cpu,
+    torch.isin(
+        generation_long_cpu[:, ::2], generation_test_cpu, invert=True
+    ),
+)
+torch.testing.assert_close(generation_negative_cpu, generation_long_cpu < 0)
+assert bool(generation_any_negative_cpu)
+torch.testing.assert_close(generation_not_negative_cpu, ~(generation_long_cpu < 0))
+assert not bool(generation_not_any_negative_cpu)
+torch.testing.assert_close(
+    generation_bool_product_cpu,
+    (generation_long_cpu < 0) * ~(generation_long_cpu < 0),
+)
+assert not bool(generation_bool_scalar_product_cpu)
+torch.testing.assert_close(
+    generation_bool_broadcast_product_cpu,
+    (generation_long_cpu < 0)[:, :1] * ~(generation_long_cpu < 0),
+)
+torch.testing.assert_close(generation_not_padding_cpu, generation_long_cpu.ne(0))
+torch.testing.assert_close(
+    generation_attention_mask_cpu,
+    generation_long_cpu.ne(0).long(),
+)
+torch.testing.assert_close(
+    generation_strided_bool_long_cpu,
+    (generation_long_cpu < 0)[1:, 1::2].long(),
+)
+torch.testing.assert_close(generation_scalar_bool_long_cpu, torch.tensor(1))
+torch.testing.assert_close(
+    generation_expanded_bool_long_cpu,
+    torch.ones((2, 3), dtype=torch.long),
+)
+torch.testing.assert_close(
+    generation_empty_bool_long_cpu,
+    torch.empty((2, 0), dtype=torch.long),
+)
+torch.testing.assert_close(generation_int_not_padding_cpu, generation_int_cpu.ne(0))
+torch.testing.assert_close(
+    generation_ne_broadcast_cpu,
+    generation_long_cpu[:, ::2].ne(generation_test_cpu),
+)
+torch.testing.assert_close(dynamic_cache_append_cpu, cache_states_cpu)
+torch.testing.assert_close(kv_key_cache_cpu, kv_key_reference)
+torch.testing.assert_close(kv_value_cache_cpu, kv_value_reference)
+torch.testing.assert_close(argmax_cpu, torch.argmax(argmax_input_cpu, dim=-1))
+torch.testing.assert_close(
+    argmax_keepdim_cpu,
+    torch.argmax(argmax_input_cpu, dim=1, keepdim=True),
+)
+torch.testing.assert_close(
+    argmax_embedding_cpu,
+    F.embedding(torch.argmax(argmax_input_cpu, dim=-1), embedding_weight_cpu),
+)
 torch.testing.assert_close(contiguous_cpu, torch.arange(12, dtype=torch.float32).reshape(3, 4).t())
 torch.testing.assert_close(
     cat_cpu,
@@ -333,11 +1197,64 @@ torch.testing.assert_close(
     rtol=3e-5,
     atol=3e-6,
 )
+stable_norm_reference = torch.native_layer_norm(
+    stable_norm_input_cpu,
+    (2, 259),
+    stable_norm_weight_cpu,
+    stable_norm_bias_cpu,
+    1e-5,
+)
+torch.testing.assert_close(
+    stable_norm_cpu,
+    stable_norm_reference[0],
+    rtol=5e-4,
+    atol=2e-3,
+)
+torch.testing.assert_close(
+    stable_norm_mean_cpu,
+    stable_norm_reference[1],
+    rtol=0.0,
+    atol=4e-3,
+)
+torch.testing.assert_close(
+    stable_norm_rstd_cpu,
+    stable_norm_reference[2],
+    rtol=5e-4,
+    atol=2e-5,
+)
 torch.testing.assert_close(
     rms_norm_cpu,
     F.rms_norm(norm_input_cpu, (4,), norm_weight_cpu, 1e-5),
     rtol=3e-5,
     atol=3e-6,
+)
+torch.testing.assert_close(
+    mean_keepdim_cpu,
+    mean_input_cpu.mean(-1, keepdim=True, dtype=torch.float32),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    mean_middle_cpu,
+    mean_input_cpu.mean(1),
+    rtol=3e-5,
+    atol=3e-6,
+)
+torch.testing.assert_close(
+    rms_composed_cpu,
+    mean_input_cpu * torch.rsqrt(mean_input_cpu.pow(2).mean(-1, keepdim=True) + 1e-6),
+    rtol=4e-5,
+    atol=4e-6,
+)
+torch.testing.assert_close(int_cast_cpu, int_cast_source_cpu.float())
+torch.testing.assert_close(dense_cast_cpu, dense_cast_source_cpu.float())
+torch.testing.assert_close(long_cast_cpu, long_cast_source_cpu.float())
+torch.testing.assert_close(same_dtype_copy_cpu, mean_input_cpu)
+assert dense_cast_result.stride() == dense_cast_source.stride()
+assert same_dtype_copy.is_contiguous()
+assert (
+    torch.ops.webgpu.buffer_id(same_dtype_copy)
+    != torch.ops.webgpu.buffer_id(mean_input)
 )
 torch.testing.assert_close(
     gqa_cpu,
@@ -375,12 +1292,19 @@ torch.testing.assert_close(
 # Timing is diagnostic only. CI uses SwiftShader, so these measurements detect
 # pathological regressions but do not represent hardware WebGPU performance.
 PERFORMANCE_REPEATS = 5
+
+def gpu_decoder_forward():
+    # One model forward is the natural submission boundary. Kernel command
+    # buffers remain ordered, while queue submission crosses JS only once.
+    with torch.webgpu.batch():
+        return decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+
 with torch.no_grad():
-    decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+    gpu_decoder_forward()
     await torch.webgpu.synchronize()
     gpu_start = time.perf_counter()
     for _ in range(PERFORMANCE_REPEATS):
-        decoder_block(decoder_ids, decoder_positions, decoder_gpu_parameters)
+        gpu_decoder_forward()
     await torch.webgpu.synchronize()
     gpu_milliseconds = (time.perf_counter() - gpu_start) * 1000 / PERFORMANCE_REPEATS
 
@@ -389,22 +1313,28 @@ with torch.no_grad():
         decoder_block(decoder_ids_cpu, position_ids_cpu, decoder_cpu_parameters)
     cpu_milliseconds = (time.perf_counter() - cpu_start) * 1000 / PERFORMANCE_REPEATS
 
+adapter_details = dict(js.webgpuTest.adapter.to_py())
 llm_performance = {
-    "adapter": dict(js.webgpuTest.adapter.to_py()) if hasattr(js.webgpuTest.adapter, "to_py") else str(js.webgpuTest.adapter),
+    "adapter": adapter_details,
     "profile": f"tiny-gpt-b{BATCH}-t{SEQUENCE}-c{WIDTH}-h{HEADS}",
     "repeats": PERFORMANCE_REPEATS,
     "gpu_ms_per_forward": gpu_milliseconds,
     "cpu_ms_per_forward": cpu_milliseconds,
     "gpu_tokens_per_second": BATCH * SEQUENCE * 1000 / gpu_milliseconds,
-    "software_adapter": True,
+    "software_adapter": adapter_details.get("architecture") == "swiftshader",
 }
 diagnostics = torch.webgpu.diagnostics()
 assert diagnostics["dispatches"] >= 100
 assert diagnostics["gpu_copies"] >= 1
 assert diagnostics["shader_compilations"] >= 5
 assert diagnostics["pipeline_creations"] >= 5
-assert diagnostics["command_submissions"] >= diagnostics["dispatches"]
-assert diagnostics["readbacks"] >= 25
+assert diagnostics["command_buffers_submitted"] >= diagnostics["dispatches"]
+assert diagnostics["command_submissions"] < diagnostics["command_buffers_submitted"]
+assert diagnostics["batched_command_buffers"] >= 15
+assert diagnostics["batch_flushes"] >= 1
+assert diagnostics["pending_command_buffers"] == 0
+assert diagnostics["batch_depth"] == 0
+assert diagnostics["readbacks"] >= 54
 assert diagnostics["uploads"] >= 50
 assert torch.webgpu.cpu_fallbacks() == 0
 state = js.globalThis.__torchWebGPU
@@ -428,25 +1358,32 @@ except RuntimeError as error:
 else:
     raise AssertionError("WebGPU autograd unexpectedly built a graph")
 
-try:
-    added.cpu()
-except RuntimeError as error:
-    assert "asynchronous" in str(error)
-else:
-    raise AssertionError("synchronous WebGPU readback unexpectedly succeeded")
-
-try:
-    torch.argmax(x)
-except (NotImplementedError, RuntimeError) as error:
-    assert "argmax" in str(error)
-else:
-    raise AssertionError("CPU-fallback argmax unexpectedly ran on WebGPU")
+added_sync_cpu = added.cpu()
+torch.testing.assert_close(added_sync_cpu, added_cpu)
+added_item = added[0].item()
+assert added_item == added_cpu[0].item()
 
 {
     "added": added_cpu.tolist(),
+    "cpu_upload_float": cpu_upload_float_cpu.tolist(),
+    "cpu_upload_long": cpu_upload_long_cpu.tolist(),
+    "cpu_upload_bool": cpu_upload_bool_cpu.tolist(),
+    "bool_all": [
+        bool(comparison_all_true),
+        bool(comparison_all_false),
+        bool(empty_bool_all),
+    ],
+    "added_sync": added_sync_cpu.tolist(),
+    "added_item": added_item,
     "multiplied": multiplied_cpu.tolist(),
     "broadcast": broadcast_cpu.tolist(),
+    "scalar_add": scalar_add_cpu.tolist(),
+    "scalar_inplace": scalar_inplace_cpu.tolist(),
+    "tensor_inplace": tensor_inplace_cpu.tolist(),
     "sliced": sliced_cpu.tolist(),
+    "strided": strided_cpu.tolist(),
+    "transposed": transposed_cpu.tolist(),
+    "strided_readback_prefix": readback_prefix_cpu.tolist(),
     "strided_doubled": strided_doubled_cpu.tolist(),
     "transposed_doubled": transposed_doubled_cpu.tolist(),
     "cloned": cloned_cpu.tolist(),
@@ -455,12 +1392,51 @@ else:
     "silu": silu_cpu.tolist(),
     "mm": mm_cpu.tolist(),
     "softmax": softmax_cpu.tolist(),
+    "linear": linear_cpu.tolist(),
+    "linear_no_bias": linear_no_bias_cpu.tolist(),
+    "linear_rank1_bias": linear_rank1_bias_cpu.tolist(),
+    "linear_view": linear_view_result_cpu.tolist(),
+    "empty_linear": empty_linear_cpu.tolist(),
+    "empty_linear_no_bias": empty_linear_no_bias_cpu.tolist(),
     "embedding": embedding_cpu.tolist(),
+    "long_embedding": long_embedding_cpu.tolist(),
+    "long_arange": long_arange_cpu.tolist(),
+    "long_cat": long_cat_cpu.tolist(),
+    "generation_cumsum": generation_cumsum_cpu.tolist(),
+    "generation_isin": generation_isin_cpu.tolist(),
+    "generation_any_negative": bool(generation_any_negative_cpu),
+    "generation_not_negative": generation_not_negative_cpu.tolist(),
+    "generation_bool_product": generation_bool_product_cpu.tolist(),
+    "generation_bool_broadcast_product": (
+        generation_bool_broadcast_product_cpu.tolist()
+    ),
+    "generation_not_padding": generation_not_padding_cpu.tolist(),
+    "generation_attention_mask": generation_attention_mask_cpu.tolist(),
+    "generation_strided_bool_long": generation_strided_bool_long_cpu.tolist(),
+    "generation_scalar_bool_long": generation_scalar_bool_long_cpu.item(),
+    "generation_expanded_bool_long": generation_expanded_bool_long_cpu.tolist(),
+    "generation_int_not_padding": generation_int_not_padding_cpu.tolist(),
+    "generation_ne_broadcast": generation_ne_broadcast_cpu.tolist(),
+    "dynamic_cache_append": dynamic_cache_append_cpu.tolist(),
+    "preallocated_kv_checksum": (
+        kv_key_cache_cpu.sum() + kv_value_cache_cpu.sum()
+    ).item(),
+    "q8_supported": q8_supported,
+    "q8_checksum": None if q8_result_cpu is None else q8_result_cpu.sum().item(),
+    "argmax": argmax_cpu.tolist(),
     "bmm": bmm_cpu.tolist(),
     "matmul": matmul_cpu.tolist(),
+    "mean_keepdim_checksum": mean_keepdim_cpu.sum().item(),
+    "int_cast_checksum": int_cast_cpu.sum().item(),
+    "long_cast": long_cast_cpu.tolist(),
     "gqa": gqa_cpu.tolist(),
     "masked_attention": masked_attention_cpu.tolist(),
     "decoder_logits_checksum": decoder_logits_cpu.sum().item(),
+    "decoder_dispatches_per_forward": decoder_dispatches,
+    "decoder_command_submissions_per_forward": decoder_command_submissions,
+    "decoder_command_buffers_per_forward": decoder_command_buffers,
+    "decoder_buffer_allocations_per_forward": decoder_buffer_allocations,
+    "decoder_tensor_allocations_per_forward": decoder_tensor_allocations,
     "llm_performance": llm_performance,
     "kernel_submissions": torch.webgpu.kernel_submissions(),
     "copy_submissions": torch.webgpu.copy_submissions(),

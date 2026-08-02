@@ -1,16 +1,22 @@
 name: Publish verified release artifact
 
 on:
+  workflow_run:
+    workflows:
+      - Build PyTorch wheel
+    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
-        description: Build workflow run containing the verified wheel artifact
+        description: Successful main Build workflow run to promote
         required: true
         type: string
-  create:
 
 concurrency:
-  group: publish-pytorch-pyodide-release
+  group: >-
+    publish-pytorch-pyodide-release-${{
+      github.event.workflow_run.id || inputs.run_id
+    }}
   cancel-in-progress: false
 
 permissions:
@@ -22,56 +28,22 @@ permissions:
 
 jobs:
   publish:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.ref_type == 'branch' &&
-        startsWith(github.event.ref, 'publish/')
-      )
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Check out release repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Publish pending release status
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/publish_status.sh pytorch-pyodide/release pending
-
-      - name: Read pinned configuration
-        id: config
-        run: |
-          python3 scripts/config.py check
-          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
-          python3 scripts/config.py env >> "$GITHUB_ENV"
-
       - name: Verify source workflow run
         id: source
         env:
-          CREATED_REF: ${{ github.event.ref }}
+          AUTOMATIC_RUN_ID: ${{ github.event.workflow_run.id }}
           GH_TOKEN: ${{ github.token }}
           REQUESTED_RUN_ID: ${{ inputs.run_id }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "create" ]]; then
-            if [[ "$CREATED_REF" =~ ^publish/([1-9][0-9]*)(-retry-[1-9][0-9]*)?$ ]]; then
-              source_run_id="${BASH_REMATCH[1]}"
-            else
-              echo "::error::Recovery branches must be named publish/<run-id>[-retry-<number>]"
-              exit 1
-            fi
-            git fetch --no-tags origin main
-            main_sha="$(git rev-parse origin/main)"
-            if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
-              echo "::error::Recovery branches must point at current main $main_sha"
-              exit 1
-            fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            source_run_id="$AUTOMATIC_RUN_ID"
           else
             source_run_id="$REQUESTED_RUN_ID"
             if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
-              echo "::error::Manual recovery must run from main"
+              echo "::error::Manual promotion must run from main"
               exit 1
             fi
           fi
@@ -82,9 +54,9 @@ jobs:
 
           mapfile -t run_fields < <(
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run_id" \
-              --jq '[.event, .head_branch, .head_sha, .head_repository.full_name, .path] | .[]'
+              --jq '[.event, .head_branch, .head_sha, .head_repository.full_name, .path, .conclusion] | .[]'
           )
-          if [[ "${#run_fields[@]}" -ne 5 ]]; then
+          if [[ "${#run_fields[@]}" -ne 6 ]]; then
             echo "::error::Could not read the source workflow metadata"
             exit 1
           fi
@@ -93,12 +65,36 @@ jobs:
           source_sha="${run_fields[2]}"
           source_repository="${run_fields[3]}"
           source_workflow="${run_fields[4]}"
-          if [[ "$source_event" != "create" || \
-                "$source_branch" != "release/$RELEASE_TAG" || \
+          source_workflow="${source_workflow%%@*}"
+          source_conclusion="${run_fields[5]}"
+          if [[ ! "$source_event" =~ ^(push|workflow_dispatch)$ || \
+                "$source_branch" != "main" || \
                 "$source_repository" != "$GITHUB_REPOSITORY" || \
                 "$source_workflow" != ".github/workflows/build.yml" || \
+                "$source_conclusion" != "success" || \
                 ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::The source run is not the pinned release build"
+            echo "::error::The source is not a successful main Build workflow run"
+            exit 1
+          fi
+
+          latest_runs_json="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs?branch=main&status=success&per_page=100"
+          )"
+          mapfile -t latest_fields < <(
+            jq -r --arg repository "$GITHUB_REPOSITORY" \
+              '[.workflow_runs[] | select(
+                  (.event == "push" or .event == "workflow_dispatch") and
+                  .head_branch == "main" and
+                  .head_repository.full_name == $repository and
+                  .conclusion == "success"
+                )] | max_by(.id) | [.id, .head_sha] | .[]' \
+              <<< "$latest_runs_json"
+          )
+          if [[ "${#latest_fields[@]}" -ne 2 || \
+                "${latest_fields[0]}" != "$source_run_id" || \
+                "${latest_fields[1]}" != "$source_sha" ]]; then
+            echo "::error::Source Build is not the newest successful eligible main Build"
             exit 1
           fi
 
@@ -106,12 +102,15 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$source_run_id/jobs?filter=latest&per_page=100"
           )"
           required_steps=(
-            "Verify release request"
+            "Reserve release identity"
             "Apply ordered patches"
             "Build raw WebAssembly wheel"
-            "Prune and validate wheel"
+            "Prune, vendor LAPACK, and validate wheel"
+            "Prepare pinned Transformers browser dependencies"
             "Test inside pinned Pyodide"
+            "Test hermetic Transformers WebGPU matrix"
             "Upload wheel and provenance"
+            "Attest wheel provenance"
           )
           for step_name in "${required_steps[@]}"; do
             conclusion="$(
@@ -125,15 +124,40 @@ jobs:
             fi
           done
 
-          git fetch --no-tags origin main "$source_sha"
-          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
-            echo "::error::Source commit $source_sha is not an ancestor of main"
-            exit 1
-          fi
           echo "run_id=$source_run_id" >> "$GITHUB_OUTPUT"
           echo "head_sha=$source_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Download verified wheel artifact
+      - name: Check out exact build source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.head_sha }}
+
+      - name: Verify source ancestry
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$SOURCE_SHA" origin/main; then
+            echo "::error::Source commit $SOURCE_SHA is not an ancestor of main"
+            exit 1
+          fi
+
+      - name: Read pinned configuration
+        id: config
+        run: |
+          python3 scripts/config.py check
+          python3 scripts/config.py github-output >> "$GITHUB_OUTPUT"
+          python3 scripts/config.py env >> "$GITHUB_ENV"
+
+      - name: Publish pending release status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
+        run: scripts/publish_status.sh pytorch-pyodide/release pending "$SOURCE_SHA"
+
+      - name: Download exact verified build artifact
         uses: actions/download-artifact@v8
         with:
           name: torch-${{ steps.config.outputs.pytorch_version }}-pyodide-${{ steps.config.outputs.pyodide_version }}
@@ -154,18 +178,52 @@ jobs:
           python3 scripts/validate_wheel.py "${wheels[0]}"
           echo "path=${wheels[0]}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify build artifact attestations
+        env:
+          BUILDER_COMMIT: ${{ steps.source.outputs.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t subjects < <(
+            find wheelhouse/dist -maxdepth 1 -type f \
+              \( -name '*.whl' -o -name '*.sha256' -o -name build-manifest.json \) \
+              -print | sort
+          )
+          test "${#subjects[@]}" -eq 3
+          for subject in "${subjects[@]}"; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/build.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$BUILDER_COMMIT" \
+              --deny-self-hosted-runners
+          done
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
           node-version: "24"
 
+      - name: Prepare pinned browser dependencies
+        run: |
+          python3 scripts/prepare_transformers_browser_deps.py \
+            --output-dir wheelhouse/transformers-browser
+
       - name: Retest inside pinned Pyodide
         run: |
+          mapfile -t filelock_wheels < <(
+            find wheelhouse/transformers-browser \
+              -maxdepth 1 \
+              -type f \
+              -name 'filelock-*.whl' \
+              -print
+          )
+          test "${#filelock_wheels[@]}" -eq 1
           npm install --no-save "pyodide@$PYODIDE_VERSION"
           node tests/smoke.mjs \
             "${{ steps.wheel.outputs.path }}" \
             "$PYTORCH_VERSION" \
-            "$PYTORCH_REF"
+            "$PYTORCH_REF" \
+            "${filelock_wheels[0]}"
 
       - name: Attest wheel provenance
         if: github.event.repository.visibility == 'public'
@@ -176,39 +234,132 @@ jobs:
             wheelhouse/dist/*.sha256
             wheelhouse/dist/build-manifest.json
 
-      - name: Publish release
+      - name: Reverify latest successful build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+          SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
+        run: |
+          latest_runs_json="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/runs?branch=main&status=success&per_page=100"
+          )"
+          mapfile -t latest_fields < <(
+            jq -r --arg repository "$GITHUB_REPOSITORY" \
+              '[.workflow_runs[] | select(
+                  (.event == "push" or .event == "workflow_dispatch") and
+                  .head_branch == "main" and
+                  .head_repository.full_name == $repository and
+                  .conclusion == "success"
+                )] | max_by(.id) | [.id, .head_sha] | .[]' \
+              <<< "$latest_runs_json"
+          )
+          if [[ "${#latest_fields[@]}" -ne 2 || \
+                "${latest_fields[0]}" != "$SOURCE_RUN_ID" || \
+                "${latest_fields[1]}" != "$SOURCE_SHA" ]]; then
+            echo "::error::A newer successful eligible main Build exists"
+            exit 1
+          fi
+
+      - name: Publish release idempotently
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
         run: |
+          tag_api_error="$(mktemp)"
           if tag_ref="$(
             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '.object.type + " " + .object.sha' 2>/dev/null
+              --jq '.object.type + " " + .object.sha' 2>"$tag_api_error"
           )"; then
-            :
-          else
-            tag_ref=""
-          fi
-          if [[ -z "$tag_ref" ]]; then
+            if [[ "$tag_ref" != "commit $SOURCE_SHA" ]]; then
+              echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
+              exit 1
+            fi
+          elif grep -Fq "(HTTP 404)" "$tag_api_error"; then
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$RELEASE_TAG" \
               -f sha="$SOURCE_SHA" >/dev/null
-          elif [[ "$tag_ref" != "commit $SOURCE_SHA" ]]; then
-            echo "::error::Existing tag $RELEASE_TAG points at $tag_ref"
+          else
+            cat "$tag_api_error" >&2
+            echo "::error::Could not safely determine whether $RELEASE_TAG exists"
             exit 1
           fi
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "::error::Release $RELEASE_TAG already exists; refusing to replace assets"
+
+          release_api_error="$(mktemp)"
+          if release_json="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              2>"$release_api_error"
+          )"; then
+            release_was_draft="$(jq -r '.draft' <<< "$release_json")"
+          elif grep -Fq "(HTTP 404)" "$release_api_error"; then
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --generate-notes \
+              --title "$RELEASE_TAG"
+            release_json="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+            )"
+            release_was_draft=true
+          else
+            cat "$release_api_error" >&2
+            echo "::error::Could not safely determine whether release $RELEASE_TAG exists"
             exit 1
           fi
-          gh release create "$RELEASE_TAG" \
-            --verify-tag \
-            --generate-notes \
-            --title "$RELEASE_TAG" \
-            wheelhouse/dist/*
+
+          mapfile -t assets < <(find wheelhouse/dist -maxdepth 1 -type f -print | sort)
+          test "${#assets[@]}" -eq 3
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            if jq -e --arg name "$name" '.assets[] | select(.name == $name)' \
+              <<< "$release_json" >/dev/null; then
+              :
+            elif [[ "$release_was_draft" == "true" ]]; then
+              gh release upload "$RELEASE_TAG" "$asset"
+            else
+              echo "::error::Published release $RELEASE_TAG is missing asset $name"
+              exit 1
+            fi
+          done
+
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          mapfile -t expected_names < <(
+            for asset in "${assets[@]}"; do basename "$asset"; done | sort
+          )
+          mapfile -t release_names < <(
+            jq -r '.assets[].name' <<< "$release_json" | sort
+          )
+          if [[ "${expected_names[*]}" != "${release_names[*]}" ]]; then
+            echo "::error::Release asset inventory does not match the verified artifact"
+            exit 1
+          fi
+          comparison_dir="$(mktemp -d)"
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            gh release download "$RELEASE_TAG" \
+              --pattern "$name" \
+              --dir "$comparison_dir"
+            if ! cmp -s "$asset" "$comparison_dir/$name"; then
+              echo "::error::Release asset $name has different content"
+              exit 1
+            fi
+          done
+          if [[ "$release_was_draft" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi
+
+      - name: Upload promoted artifact for Pages
+        uses: actions/upload-artifact@v7
+        with:
+          name: published-${{ github.run_id }}-${{ github.run_attempt }}
+          path: wheelhouse/dist/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
 
       - name: Publish final release status
-        if: always()
+        if: always() && steps.source.outputs.head_sha != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/publish_status.sh pytorch-pyodide/release "${{ job.status }}"
+          SOURCE_SHA: ${{ steps.source.outputs.head_sha }}
+        run: scripts/publish_status.sh pytorch-pyodide/release "${{ job.status }}" "$SOURCE_SHA"

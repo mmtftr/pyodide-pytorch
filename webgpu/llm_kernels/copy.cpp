@@ -22,14 +22,16 @@ struct CopyParams {
   std::uint32_t ndim;
   std::uint32_t source_offset;
   std::uint32_t destination_offset;
+  std::uint32_t element_words;
+  std::uint32_t padding[3];
   std::uint32_t sizes[8];
   std::uint32_t source_strides[8];
   std::uint32_t destination_strides[8];
 };
 
-static_assert(sizeof(CopyParams) == 112);
+static_assert(sizeof(CopyParams) == 128);
 
-void copy_strided(const at::Tensor& source, at::Tensor& destination) {
+void copy_strided_impl(const at::Tensor& source, at::Tensor& destination) {
   check_inference_tensor(source, "WebGPU strided copy");
   check_inference_tensor(destination, "WebGPU strided copy");
   TORCH_CHECK(source.scalar_type() == destination.scalar_type(),
@@ -51,6 +53,14 @@ void copy_strided(const at::Tensor& source, at::Tensor& destination) {
       checked_u32(source.storage_offset(), "strided-copy source offset");
   params.destination_offset = checked_u32(
       destination.storage_offset(), "strided-copy destination offset");
+  TORCH_CHECK(
+      source.element_size() == 1 || source.element_size() == 4 ||
+          source.element_size() == 8,
+      "WebGPU strided copy supports byte-packed Bool, 32-bit values, and "
+      "restricted Long");
+  params.element_words = source.scalar_type() == at::kBool
+      ? 0
+      : static_cast<std::uint32_t>(source.element_size() / 4);
   for (const auto dim : c10::irange(source.dim())) {
     TORCH_CHECK(source.stride(dim) >= 0 && destination.stride(dim) >= 0,
         "WebGPU strided copy does not support negative strides");
@@ -66,7 +76,10 @@ void copy_strided(const at::Tensor& source, at::Tensor& destination) {
       tensor_entry(0, source),
       tensor_entry(1, destination),
       buffer_entry(2, params_buffer, sizeof(params))};
-  dispatch(strided_copy_kernel(), entries, (params.length + 63) / 64);
+  dispatch(
+      strided_copy_kernel(),
+      entries,
+      params.element_words == 0 ? 1 : (params.length + 63) / 64);
 }
 
 at::Tensor clone_impl(
@@ -99,7 +112,21 @@ at::Tensor contiguous_impl(
 
 at::Tensor cat_impl(const at::ITensorListRef& tensors, std::int64_t dim) {
   TORCH_CHECK(!tensors.empty(), "cat expects a non-empty tensor list");
-  const auto& first = tensors.front();
+  // PyTorch treats a legacy 1-D empty tensor as skippable. Transformers 5.x
+  // initializes DynamicCache with exactly that sentinel before its first
+  // float32 key/value append.
+  std::vector<at::Tensor> effective_tensors;
+  effective_tensors.reserve(tensors.size());
+  for (const auto& tensor : tensors) {
+    if (!(tensor.dim() == 1 && tensor.numel() == 0)) {
+      effective_tensors.push_back(tensor);
+    }
+  }
+  if (effective_tensors.empty()) {
+    effective_tensors.assign(tensors.begin(), tensors.end());
+  }
+
+  const auto& first = effective_tensors.front();
   check_inference_tensor(first, "WebGPU cat");
   const auto rank = first.dim();
   if (dim < 0) {
@@ -108,7 +135,7 @@ at::Tensor cat_impl(const at::ITensorListRef& tensors, std::int64_t dim) {
   TORCH_CHECK(dim >= 0 && dim < rank, "WebGPU cat dimension out of range");
 
   std::int64_t concatenated_size = 0;
-  for (const auto& tensor : tensors) {
+  for (const auto& tensor : effective_tensors) {
     check_inference_tensor(tensor, "WebGPU cat");
     TORCH_CHECK(tensor.scalar_type() == first.scalar_type(),
         "WebGPU cat requires matching dtypes");
@@ -126,7 +153,7 @@ at::Tensor cat_impl(const at::ITensorListRef& tensors, std::int64_t dim) {
   output_sizes[dim] = concatenated_size;
   auto output = at::empty(output_sizes, first.options());
   std::int64_t offset = 0;
-  for (const auto& tensor : tensors) {
+  for (const auto& tensor : effective_tensors) {
     if (tensor.numel() != 0) {
       auto output_slice = output.narrow(dim, offset, tensor.size(dim));
       copy_strided(tensor, output_slice);
@@ -137,6 +164,10 @@ at::Tensor cat_impl(const at::ITensorListRef& tensors, std::int64_t dim) {
 }
 
 } // namespace
+
+void copy_strided(const at::Tensor& source, at::Tensor& destination) {
+  copy_strided_impl(source, destination);
+}
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
   module.impl("clone", TORCH_FN(clone_impl));

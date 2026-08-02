@@ -26,7 +26,8 @@ struct EmbeddingParams {
   std::uint32_t weight_stride0;
   std::uint32_t weight_stride1;
   std::uint32_t dispatch_x;
-  std::uint32_t padding[3];
+  std::uint32_t index_words;
+  std::uint32_t padding[2];
 };
 
 static_assert(sizeof(EmbeddingParams) == 48);
@@ -38,7 +39,11 @@ at::Tensor embedding_impl(
     bool scale_grad_by_freq,
     bool sparse) {
   check_inference_tensor(weight, "WebGPU embedding weight", at::kFloat);
-  check_inference_tensor(indices, "WebGPU embedding indices", at::kInt);
+  check_inference_tensor(indices, "WebGPU embedding indices");
+  TORCH_CHECK(
+      indices.scalar_type() == at::kInt || indices.scalar_type() == at::kLong,
+      "WebGPU embedding indices must be torch.int32 or signed-int32-valued "
+      "torch.int64");
   TORCH_CHECK(weight.dim() == 2, "WebGPU embedding weight must be 2-D");
   TORCH_CHECK(!scale_grad_by_freq && !sparse,
       "WebGPU embedding supports inference-only forward semantics");
@@ -74,6 +79,7 @@ at::Tensor embedding_impl(
   params.weight_stride1 =
       checked_u32(weight.stride(1), "embedding weight stride 1");
   params.dispatch_x = dispatch_x;
+  params.index_words = indices.scalar_type() == at::kLong ? 2 : 1;
 
   auto params_buffer = make_params_buffer("embedding params", params);
   auto entries = std::vector<wgpu::BindGroupEntry>{

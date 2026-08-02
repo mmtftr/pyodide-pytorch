@@ -1,0 +1,884 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hermetic Transformers WebGPU acceptance test</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const transformersWheel = parameters.get("transformers");
+    const hubWheel = parameters.get("hub");
+    const rmsNormOnly = parameters.get("rms_norm_only") === "1";
+    window.webgpuTestRmsNormOnly = rmsNormOnly;
+    if (!wheel || !filelockWheel || !transformersWheel || !hubWheel) {
+      throw new Error("wheel query parameters are missing");
+    }
+    const adapter = await navigator.gpu?.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null || adapter === undefined) {
+      throw new Error("WebGPU adapter unavailable");
+    }
+    const adapterInfo = adapter.info ?? {};
+    const fixed32Subgroups =
+      adapter.features.has("subgroups") &&
+      adapterInfo.subgroupMinSize === 32 &&
+      adapterInfo.subgroupMaxSize === 32;
+    const requiredFeatures = fixed32Subgroups ? ["subgroups"] : [];
+    const device = await adapter.requestDevice({ requiredFeatures });
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    window.webgpuTestAdapter = adapter;
+    window.webgpuTestDevice = device;
+    window.webgpuTestFixed32Subgroups = fixed32Subgroups;
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "fsspec",
+      "jinja2",
+      "networkx",
+      "numpy",
+      "pyyaml",
+      "regex",
+      "requests",
+      "safetensors",
+      "sympy",
+      "tqdm",
+      "typing-extensions",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+    await pyodide.loadPackage(`/dependency/${hubWheel}`);
+    await pyodide.loadPackage(`/dependency/${transformersWheel}`);
+
+    const q8Response = await fetch("/runtime/transformers_q8.py");
+    if (!q8Response.ok) {
+      throw new Error(`Q8 helper request failed: ${q8Response.status}`);
+    }
+    pyodide.FS.writeFile("transformers_q8.py", await q8Response.text());
+
+    const result = await pyodide.runPythonAsync(`
+import contextlib
+import gc
+import importlib
+import importlib.metadata
+import importlib.util
+import json
+import os
+import traceback
+
+import js
+import torch
+import torch.nn.functional as F
+import torch.webgpu
+from torch.utils._python_dispatch import TorchDispatchMode
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+import transformers
+from transformers.utils import is_tokenizers_available
+
+manifest_response = await js.fetch(
+    "/fixtures/transformers-browser-manifest.json"
+)
+if not manifest_response.ok:
+    raise RuntimeError(f"manifest request failed: {manifest_response.status}")
+manifest = json.loads(await manifest_response.text())
+assert manifest["model_only"]
+assert not manifest["tokenizers_included"]
+package_versions = {
+    package["name"].lower().replace("_", "-"): package["version"]
+    for package in manifest["packages"]
+}
+assert transformers.__version__ == package_versions["transformers"]
+assert importlib.metadata.version("huggingface-hub") == package_versions[
+    "huggingface-hub"
+]
+assert importlib.util.find_spec("tokenizers") is None
+assert not is_tokenizers_available()
+try:
+    importlib.metadata.version("tokenizers")
+except importlib.metadata.PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("tokenizers distribution unexpectedly installed")
+
+bootstrap_response = await js.fetch(
+    "/runtime/transformers_browser_bootstrap.py"
+)
+if not bootstrap_response.ok:
+    raise RuntimeError(f"bootstrap request failed: {bootstrap_response.status}")
+bootstrap_namespace = {}
+exec(await bootstrap_response.text(), bootstrap_namespace)
+gguf_disabled = bootstrap_namespace[
+    "disable_optional_gguf_without_tokenizers"
+]()
+assert gguf_disabled
+rms_norm_fusion = bootstrap_namespace["enable_webgpu_rms_norm_fusion"]()
+rms_norm_fusion_repeat = bootstrap_namespace[
+    "enable_webgpu_rms_norm_fusion"
+]()
+rotary_scaling_compatibility = bootstrap_namespace[
+    "enable_webgpu_rotary_scaling_compatibility"
+]()
+rotary_scaling_compatibility_repeat = bootstrap_namespace[
+    "enable_webgpu_rotary_scaling_compatibility"
+]()
+swiglu_fusion = bootstrap_namespace["enable_webgpu_swiglu_fusion"]()
+swiglu_fusion_repeat = bootstrap_namespace[
+    "enable_webgpu_swiglu_fusion"
+]()
+opt_sdpa_mask_compatibility = bootstrap_namespace[
+    "enable_webgpu_opt_sdpa_mask_compatibility"
+]()
+opt_sdpa_mask_compatibility_repeat = bootstrap_namespace[
+    "enable_webgpu_opt_sdpa_mask_compatibility"
+]()
+preallocated_kv_cache = bootstrap_namespace[
+    "enable_webgpu_preallocated_kv_cache"
+]()
+preallocated_kv_cache_repeat = bootstrap_namespace[
+    "enable_webgpu_preallocated_kv_cache"
+]()
+assert rms_norm_fusion["enabled"]
+assert rms_norm_fusion["transformers_version"] == "4.46.3"
+assert rms_norm_fusion["newly_patched"] == 4
+assert rms_norm_fusion["already_patched"] == 0
+assert rms_norm_fusion_repeat["newly_patched"] == 0
+assert rms_norm_fusion_repeat["already_patched"] == 4
+assert [target["status"] for target in rms_norm_fusion_repeat["targets"]] == [
+    "already_enabled",
+    "already_enabled",
+    "already_enabled",
+    "already_enabled",
+]
+assert rotary_scaling_compatibility["enabled"]
+assert rotary_scaling_compatibility["transformers_version"] == "4.46.3"
+assert rotary_scaling_compatibility["newly_patched"] == 2
+assert rotary_scaling_compatibility["already_patched"] == 0
+assert rotary_scaling_compatibility["identity_dispatches_saved_per_call"] == 2
+assert rotary_scaling_compatibility_repeat["newly_patched"] == 0
+assert rotary_scaling_compatibility_repeat["already_patched"] == 2
+assert [
+    target["status"]
+    for target in rotary_scaling_compatibility_repeat["targets"]
+] == ["already_enabled", "already_enabled"]
+assert swiglu_fusion["enabled"]
+assert swiglu_fusion["transformers_version"] == "4.46.3"
+assert swiglu_fusion["newly_patched"] == 3
+assert swiglu_fusion["already_patched"] == 0
+assert swiglu_fusion["upstream_dispatches_before_down_proj"] == 4
+assert swiglu_fusion["fused_dispatches_before_down_proj"] == 1
+assert swiglu_fusion["dispatches_saved_per_fused_call"] == 3
+assert swiglu_fusion_repeat["newly_patched"] == 0
+assert swiglu_fusion_repeat["already_patched"] == 3
+assert [target["status"] for target in swiglu_fusion_repeat["targets"]] == [
+    "already_enabled",
+    "already_enabled",
+    "already_enabled",
+]
+assert opt_sdpa_mask_compatibility["enabled"]
+assert opt_sdpa_mask_compatibility["transformers_version"] == "4.46.3"
+assert opt_sdpa_mask_compatibility["newly_patched"] == 1
+assert opt_sdpa_mask_compatibility["already_patched"] == 0
+assert (
+    opt_sdpa_mask_compatibility[
+        "host_mask_truth_readbacks_avoided_per_eligible_call"
+    ]
+    == 1
+)
+assert opt_sdpa_mask_compatibility_repeat["newly_patched"] == 0
+assert opt_sdpa_mask_compatibility_repeat["already_patched"] == 1
+assert [
+    target["status"]
+    for target in opt_sdpa_mask_compatibility_repeat["targets"]
+] == ["already_enabled"]
+assert preallocated_kv_cache["enabled"]
+assert preallocated_kv_cache["transformers_version"] == "4.46.3"
+assert preallocated_kv_cache["newly_registered"] == 1
+assert preallocated_kv_cache["already_registered"] == 0
+assert preallocated_kv_cache_repeat["newly_registered"] == 0
+assert preallocated_kv_cache_repeat["already_registered"] == 1
+assert preallocated_kv_cache["cache_implementation"] == "webgpu_preallocated"
+assert preallocated_kv_cache["dispatches_saved_per_layer_per_token"] == 3
+
+fixture_response = await js.fetch("/fixtures/transformers_tiny.json")
+if not fixture_response.ok:
+    raise RuntimeError(f"fixture request failed: {fixture_response.status}")
+fixture = json.loads(await fixture_response.text())
+assert fixture["transformers_version"] == package_versions["transformers"]
+
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+
+# Exercise the registered cache class itself, not only its custom operator.
+# Two sequential updates must reuse fixed storage and publish an exact prefix.
+qwen_spec = next(
+    model for model in fixture["models"] if model["name"] == "qwen2"
+)
+cache_config = transformers.Qwen2Config(**qwen_spec["kwargs"])
+cache_class = importlib.import_module(
+    "transformers.cache_utils"
+).WebGPUPreallocatedCache
+cache = cache_class(
+    config=cache_config,
+    batch_size=1,
+    max_cache_len=4,
+    device="webgpu",
+    dtype=torch.float32,
+)
+cache_keys_cpu = torch.linspace(-1.0, 1.0, 16).reshape(1, 2, 2, 4)
+cache_values_cpu = cache_keys_cpu * -3.0 + 0.25
+cache_tail_keys_cpu = torch.full((1, 2, 1, 4), 7.0)
+cache_tail_values_cpu = torch.full((1, 2, 1, 4), -11.0)
+cache_before = torch.webgpu.diagnostics()
+with torch.no_grad(), torch.webgpu.batch():
+    cache.update(
+        cache_keys_cpu.to("webgpu"),
+        cache_values_cpu.to("webgpu"),
+        0,
+        {
+            "cache_position": torch.tensor(
+                [0, 1], dtype=torch.long, device="webgpu"
+            )
+        },
+    )
+    cache_keys_gpu, cache_values_gpu = cache.update(
+        cache_tail_keys_cpu.to("webgpu"),
+        cache_tail_values_cpu.to("webgpu"),
+        0,
+        {
+            "cache_position": torch.tensor(
+                [2], dtype=torch.int32, device="webgpu"
+            )
+        },
+    )
+assert not cache_keys_gpu.is_contiguous()
+assert not cache_values_gpu.is_contiguous()
+cache_keys_actual = await torch.webgpu.to_cpu_async(cache_keys_gpu)
+cache_values_actual = await torch.webgpu.to_cpu_async(cache_values_gpu)
+cache_after = torch.webgpu.diagnostics()
+cache_keys_expected = torch.cat((cache_keys_cpu, cache_tail_keys_cpu), dim=2)
+cache_values_expected = torch.cat(
+    (cache_values_cpu, cache_tail_values_cpu), dim=2
+)
+torch.testing.assert_close(cache_keys_actual, cache_keys_expected)
+torch.testing.assert_close(cache_values_actual, cache_values_expected)
+assert cache.get_seq_length() == 3
+assert cache_keys_gpu.shape == (1, 2, 3, 4)
+assert cache_values_gpu.shape == (1, 2, 3, 4)
+assert (
+    torch.ops.webgpu.buffer_id(cache_keys_gpu)
+    == torch.ops.webgpu.buffer_id(cache._pyodide_pytorch_key_storage[0])
+)
+assert (
+    torch.ops.webgpu.buffer_id(cache_values_gpu)
+    == torch.ops.webgpu.buffer_id(cache._pyodide_pytorch_value_storage[0])
+)
+cache_probe = {
+    "updates": 2,
+    "dispatches": int(cache_after["dispatches"] - cache_before["dispatches"]),
+    "readbacks": int(cache_after["readbacks"] - cache_before["readbacks"]),
+    "valid_prefix": cache.get_seq_length(),
+    "storage_reused": True,
+}
+# The two cache writes remain one dispatch each. Reading their non-contiguous
+# prefix views materializes each view on the GPU before the two async readbacks.
+assert cache_probe["dispatches"] == 4
+assert cache_probe["readbacks"] == 2
+
+
+# Exercise the Python conversion helper end to end. Hardware with fixed SIMD32
+# must run the packed operator; other adapters must fail closed after conversion.
+from transformers_q8 import (
+    WebGPUQ8Linear,
+    convert_linear_modules_q8_,
+    pack_q8_weight,
+)
+
+torch.manual_seed(fixture["seed"] + 900)
+q8_linear_cpu = torch.nn.Linear(128, 132, bias=True).eval()
+q8_input_cpu = torch.linspace(-0.75, 0.75, 128).reshape(1, 1, 128)
+q8_packed_cpu, q8_scales_cpu = pack_q8_weight(
+    q8_linear_cpu.weight.detach()
+)
+q8_bytes_cpu = torch.stack(
+    tuple((q8_packed_cpu >> shift) & 0xFF for shift in (0, 8, 16, 24)),
+    dim=-1,
+).reshape(132, 128)
+q8_signed_cpu = torch.where(
+    q8_bytes_cpu >= 128,
+    q8_bytes_cpu - 256,
+    q8_bytes_cpu,
+).to(torch.float32)
+q8_dequantized_cpu = (
+    q8_signed_cpu.reshape(132, 1, 128)
+    * q8_scales_cpu.unsqueeze(-1)
+    / 127.0
+).reshape(132, 128)
+q8_expected = F.linear(
+    q8_input_cpu,
+    q8_dequantized_cpu,
+    q8_linear_cpu.bias.detach(),
+)
+q8_container = torch.nn.Sequential(q8_linear_cpu).eval()
+q8_records = convert_linear_modules_q8_(q8_container)
+assert len(q8_records) == 1
+assert isinstance(q8_container[0], WebGPUQ8Linear)
+assert not hasattr(q8_container[0], "weight")
+assert q8_records[0].packed_weight_bytes * 3 < q8_records[0].float_weight_bytes
+q8_supported = bool(js.webgpuTestFixed32Subgroups)
+q8_probe = {
+    "fixed_simd32": q8_supported,
+    "converted_modules": len(q8_records),
+    "float_weight_bytes": q8_records[0].float_weight_bytes,
+    "packed_weight_bytes": q8_records[0].packed_weight_bytes,
+}
+if q8_supported:
+    q8_before = torch.webgpu.diagnostics()
+    with torch.no_grad(), torch.webgpu.batch():
+        q8_actual_gpu = q8_container(q8_input_cpu.to("webgpu"))
+    q8_actual = await torch.webgpu.to_cpu_async(q8_actual_gpu)
+    q8_after = torch.webgpu.diagnostics()
+    torch.testing.assert_close(q8_actual, q8_expected, rtol=2e-5, atol=2e-6)
+    q8_probe["dispatches"] = int(
+        q8_after["dispatches"] - q8_before["dispatches"]
+    )
+    q8_probe["readbacks"] = int(
+        q8_after["readbacks"] - q8_before["readbacks"]
+    )
+    assert q8_probe["dispatches"] == 1
+    assert q8_probe["readbacks"] == 1
+else:
+    try:
+        q8_container(q8_input_cpu.to("webgpu"))
+    except RuntimeError as error:
+        q8_probe["fail_closed"] = "fixed-size-32 WebGPU subgroup" in str(error)
+        assert q8_probe["fail_closed"]
+    else:
+        raise AssertionError("Q8 conversion unexpectedly ran without SIMD32")
+
+
+class OpRecorder(TorchDispatchMode):
+    def __init__(self):
+        self.ops = set()
+        self.counts = {}
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        schema = func._schema
+        name = schema.name
+        if schema.overload_name:
+            name += "." + schema.overload_name
+        self.ops.add(name)
+        self.counts[name] = self.counts.get(name, 0) + 1
+        return func(*args, **(kwargs or {}))
+
+
+def has_webgpu_kernel(name):
+    for query in (
+        "_dispatch_has_computed_kernel_for_dispatch_key",
+        "_dispatch_has_kernel_for_dispatch_key",
+    ):
+        checker = getattr(torch._C, query, None)
+        if checker is None:
+            continue
+        try:
+            return bool(checker(name, "PrivateUse1"))
+        except RuntimeError:
+            continue
+    return None
+
+
+def model_inputs(name, device):
+    values = {
+        "input_ids": torch.tensor(
+            fixture["input_ids"], dtype=torch.long, device=device
+        ),
+        "position_ids": torch.tensor(
+            fixture["position_ids"], dtype=torch.long, device=device
+        ),
+    }
+    if name in ("qwen2", "llama", "mistral", "phi3"):
+        values["cache_position"] = torch.tensor(
+            fixture["cache_position"], dtype=torch.long, device=device
+        )
+        values["use_cache"] = False
+    elif name == "opt":
+        # Omit attention_mask so the exact-version adapter proves that this
+        # known all-one SDPA branch needs no GPU truth readback.
+        values["use_cache"] = False
+    elif name == "bert":
+        values["attention_mask"] = torch.tensor(
+            fixture["attention_mask"], dtype=torch.long, device=device
+        )
+        values["token_type_ids"] = torch.tensor(
+            fixture["token_type_ids"], dtype=torch.long, device=device
+        )
+    values["return_dict"] = True
+    return values
+
+
+rms_norm_probes = []
+for module_name, class_name in (
+    ("transformers.models.qwen2.modeling_qwen2", "Qwen2RMSNorm"),
+    ("transformers.models.llama.modeling_llama", "LlamaRMSNorm"),
+    ("transformers.models.mistral.modeling_mistral", "MistralRMSNorm"),
+    ("transformers.models.phi3.modeling_phi3", "Phi3RMSNorm"),
+):
+    norm_class = getattr(importlib.import_module(module_name), class_name)
+    upstream_forward = getattr(norm_class.forward, "__wrapped__", None)
+    assert upstream_forward is not None, class_name
+    norm = norm_class(16).eval()
+    norm_input_cpu = torch.linspace(-2.0, 2.0, 2 * 3 * 16).reshape(2, 3, 16)
+    cpu_recorder = OpRecorder()
+    with torch.no_grad(), cpu_recorder:
+        norm_expected = norm(norm_input_cpu)
+    expected_cpu_counts = {
+        "aten::add.Tensor": 1,
+        "aten::mean.dim": 1,
+        "aten::mul.Tensor": 2,
+        "aten::pow.Tensor_Scalar": 1,
+        "aten::rsqrt": 1,
+    }
+    assert cpu_recorder.counts == expected_cpu_counts, (
+        class_name,
+        cpu_recorder.counts,
+    )
+    assert "aten::rms_norm" not in cpu_recorder.ops
+    upstream_operator_count = sum(cpu_recorder.counts.values())
+    assert upstream_operator_count == 6, (class_name, upstream_operator_count)
+
+    norm.to("webgpu")
+    norm_input_gpu = norm_input_cpu.to("webgpu")
+    batch = getattr(torch.webgpu, "batch", contextlib.nullcontext)
+
+    fused_before = torch.webgpu.diagnostics()
+    fused_recorder = OpRecorder()
+    with torch.no_grad(), batch(), fused_recorder:
+        fused_output = norm(norm_input_gpu)
+    fused_actual = await torch.webgpu.to_cpu_async(fused_output)
+    fused_after = torch.webgpu.diagnostics()
+
+    fused_dispatches = int(
+        fused_after["dispatches"] - fused_before["dispatches"]
+    )
+    fused_readbacks = int(
+        fused_after["readbacks"] - fused_before["readbacks"]
+    )
+    fused_cpu_fallbacks = int(
+        fused_after["cpu_fallbacks"] - fused_before["cpu_fallbacks"]
+    )
+    logical_dispatches_saved = upstream_operator_count - fused_dispatches
+    assert fused_recorder.counts == {"aten::rms_norm": 1}, (
+        class_name,
+        fused_recorder.counts,
+    )
+    assert fused_dispatches == 1, (class_name, fused_dispatches)
+    assert fused_readbacks == 1, (class_name, fused_readbacks)
+    assert fused_cpu_fallbacks == 0, (class_name, fused_cpu_fallbacks)
+    assert logical_dispatches_saved == 5, (
+        class_name,
+        logical_dispatches_saved,
+    )
+    torch.testing.assert_close(fused_actual, norm_expected, rtol=4e-5, atol=4e-6)
+    rms_norm_probes.append({
+        "class": class_name,
+        "unmodified_cpu_path": dict(sorted(cpu_recorder.counts.items())),
+        "upstream_operator_count": upstream_operator_count,
+        "fused_webgpu_path": dict(sorted(fused_recorder.counts.items())),
+        "fused_dispatches": fused_dispatches,
+        "fused_readbacks": fused_readbacks,
+        "fused_cpu_fallbacks": fused_cpu_fallbacks,
+        "logical_dispatches_saved": logical_dispatches_saved,
+    })
+    del norm, norm_input_gpu, fused_output
+    gc.collect()
+
+rms_norm_validation_error = await js.webgpuTestDevice.popErrorScope()
+if rms_norm_validation_error:
+    raise RuntimeError(
+        "RMSNorm probe WebGPU validation error: "
+        + rms_norm_validation_error.message
+    )
+js.webgpuTestDevice.pushErrorScope("validation")
+
+
+swiglu_probes = []
+for index, (family_name, module_name, class_name) in enumerate((
+    (
+        "qwen2",
+        "transformers.models.qwen2.modeling_qwen2",
+        "Qwen2MLP",
+    ),
+    (
+        "llama",
+        "transformers.models.llama.modeling_llama",
+        "LlamaMLP",
+    ),
+    (
+        "mistral",
+        "transformers.models.mistral.modeling_mistral",
+        "MistralMLP",
+    ),
+)):
+    spec = next(model for model in fixture["models"] if model["name"] == family_name)
+    config = getattr(transformers, spec["config_class"])(**spec["kwargs"])
+    mlp_class = getattr(importlib.import_module(module_name), class_name)
+    upstream_forward = getattr(mlp_class.forward, "__wrapped__", None)
+    assert upstream_forward is not None, class_name
+    torch.manual_seed(fixture["seed"] + 100 + index)
+    mlp = mlp_class(config).eval()
+    mlp_input_cpu = torch.linspace(
+        -1.0,
+        1.0,
+        config.hidden_size,
+        dtype=torch.float32,
+    ).reshape(1, 1, config.hidden_size)
+
+    cpu_recorder = OpRecorder()
+    with torch.no_grad(), cpu_recorder:
+        mlp_expected = mlp(mlp_input_cpu)
+    upstream_linear_dispatches = (
+        cpu_recorder.counts.get("aten::mm", 0)
+        + cpu_recorder.counts.get("aten::addmm", 0)
+    )
+    assert upstream_linear_dispatches == 3, (
+        class_name,
+        cpu_recorder.counts,
+    )
+    assert cpu_recorder.counts.get("aten::silu", 0) == 1
+    assert cpu_recorder.counts.get("aten::mul.Tensor", 0) == 1
+    upstream_dispatches = upstream_linear_dispatches + 2
+    assert upstream_dispatches == 5
+
+    mlp.to("webgpu")
+    mlp_input_gpu = mlp_input_cpu.to("webgpu")
+    before = torch.webgpu.diagnostics()
+    gpu_recorder = OpRecorder()
+    batch = getattr(torch.webgpu, "batch", contextlib.nullcontext)
+    with torch.no_grad(), batch(), gpu_recorder:
+        mlp_output_gpu = mlp(mlp_input_gpu)
+    mlp_actual = await torch.webgpu.to_cpu_async(mlp_output_gpu)
+    after = torch.webgpu.diagnostics()
+
+    fused_calls = gpu_recorder.counts.get("webgpu::fused_swiglu", 0)
+    remaining_linear_dispatches = (
+        gpu_recorder.counts.get("aten::linear", 0)
+        + gpu_recorder.counts.get("aten::mm", 0)
+        + gpu_recorder.counts.get("aten::addmm", 0)
+    )
+    dispatches = int(after["dispatches"] - before["dispatches"])
+    readbacks = int(after["readbacks"] - before["readbacks"])
+    cpu_fallbacks = int(after["cpu_fallbacks"] - before["cpu_fallbacks"])
+    assert fused_calls == 1, (class_name, gpu_recorder.counts)
+    assert remaining_linear_dispatches == 1, (
+        class_name,
+        gpu_recorder.counts,
+    )
+    assert gpu_recorder.counts.get("aten::silu", 0) == 0
+    assert gpu_recorder.counts.get("aten::mul.Tensor", 0) == 0
+    assert dispatches == 2, (class_name, dispatches, gpu_recorder.counts)
+    assert readbacks == 1, (class_name, readbacks)
+    assert cpu_fallbacks == 0, (class_name, cpu_fallbacks)
+    assert upstream_dispatches - dispatches == 3
+    torch.testing.assert_close(
+        mlp_actual,
+        mlp_expected,
+        rtol=8e-4,
+        atol=8e-5,
+    )
+    swiglu_probes.append({
+        "class": class_name,
+        "unmodified_cpu_path": dict(sorted(cpu_recorder.counts.items())),
+        "upstream_dispatches": upstream_dispatches,
+        "fused_webgpu_path": dict(sorted(gpu_recorder.counts.items())),
+        "fused_dispatches": dispatches,
+        "fused_readbacks": readbacks,
+        "fused_cpu_fallbacks": cpu_fallbacks,
+        "logical_dispatches_saved": upstream_dispatches - dispatches,
+    })
+    del mlp, mlp_input_gpu, mlp_output_gpu
+    gc.collect()
+
+swiglu_validation_error = await js.webgpuTestDevice.popErrorScope()
+if swiglu_validation_error:
+    raise RuntimeError(
+        "SwiGLU probe WebGPU validation error: "
+        + swiglu_validation_error.message
+    )
+js.webgpuTestDevice.pushErrorScope("validation")
+
+
+rotary_scaling_probes = []
+for family_name, module_name, class_name in (
+    (
+        "qwen2",
+        "transformers.models.qwen2.modeling_qwen2",
+        "Qwen2RotaryEmbedding",
+    ),
+    (
+        "llama",
+        "transformers.models.llama.modeling_llama",
+        "LlamaRotaryEmbedding",
+    ),
+):
+    spec = next(model for model in fixture["models"] if model["name"] == family_name)
+    config = getattr(transformers, spec["config_class"])(**spec["kwargs"])
+    rotary_class = getattr(importlib.import_module(module_name), class_name)
+    rotary = rotary_class(config=config).eval()
+    upstream_forward = getattr(rotary_class.forward, "__wrapped__", None)
+    assert upstream_forward is not None, class_name
+    rotary_input_cpu = torch.linspace(-1.0, 1.0, 1 * 4 * 4 * 4).reshape(
+        1, 4, 4, 4
+    )
+    rotary_positions_cpu = torch.tensor(
+        fixture["position_ids"], dtype=torch.long
+    )
+    cpu_recorder = OpRecorder()
+    with torch.no_grad(), cpu_recorder:
+        expected_cos, expected_sin = rotary(
+            rotary_input_cpu,
+            rotary_positions_cpu,
+        )
+    upstream_scaling_dispatches = cpu_recorder.counts.get(
+        "aten::mul.Tensor", 0
+    )
+    assert upstream_scaling_dispatches == 2, (
+        class_name,
+        cpu_recorder.counts,
+    )
+    expected_rotary = torch.cat((expected_cos, expected_sin), dim=-1)
+
+    rotary.to("webgpu")
+    rotary_input_gpu = rotary_input_cpu.to("webgpu")
+    rotary_positions_gpu = rotary_positions_cpu.to("webgpu")
+    before = torch.webgpu.diagnostics()
+    gpu_recorder = OpRecorder()
+    batch = getattr(torch.webgpu, "batch", contextlib.nullcontext)
+    with torch.no_grad(), batch(), gpu_recorder:
+        actual_cos, actual_sin = rotary(
+            rotary_input_gpu,
+            rotary_positions_gpu,
+        )
+        actual_rotary_gpu = torch.cat((actual_cos, actual_sin), dim=-1)
+    actual_rotary = await torch.webgpu.to_cpu_async(actual_rotary_gpu)
+    after = torch.webgpu.diagnostics()
+    torch.testing.assert_close(
+        actual_rotary,
+        expected_rotary,
+        rtol=4e-5,
+        atol=4e-6,
+    )
+    assert gpu_recorder.counts.get("aten::mul.Tensor", 0) == 0, (
+        class_name,
+        gpu_recorder.counts,
+    )
+    assert gpu_recorder.counts.get("aten::mul.Scalar", 0) == 0, (
+        class_name,
+        gpu_recorder.counts,
+    )
+    dispatches = int(after["dispatches"] - before["dispatches"])
+    readbacks = int(after["readbacks"] - before["readbacks"])
+    cpu_fallbacks = int(after["cpu_fallbacks"] - before["cpu_fallbacks"])
+    assert dispatches > 0, (class_name, dispatches)
+    assert readbacks == 1, (class_name, readbacks)
+    assert cpu_fallbacks == 0, (class_name, cpu_fallbacks)
+    rotary_scaling_probes.append({
+        "class": class_name,
+        "unmodified_cpu_scaling_path": {"aten::mul.Tensor": 2},
+        "webgpu_scaling_path": {},
+        "identity_dispatches_saved": 2,
+        "dispatches": dispatches,
+        "readbacks": readbacks,
+        "cpu_fallbacks": cpu_fallbacks,
+        "gpu_op_counts": dict(sorted(gpu_recorder.counts.items())),
+    })
+    del rotary, rotary_input_gpu, rotary_positions_gpu, actual_rotary_gpu
+    gc.collect()
+
+rotary_validation_error = await js.webgpuTestDevice.popErrorScope()
+if rotary_validation_error:
+    raise RuntimeError(
+        "Rotary scaling probe WebGPU validation error: "
+        + rotary_validation_error.message
+    )
+js.webgpuTestDevice.pushErrorScope("validation")
+
+
+model_specs = [] if bool(js.webgpuTestRmsNormOnly) else fixture["models"]
+results = []
+for index, spec in enumerate(model_specs):
+    name = spec["name"]
+    entry = {"name": name, "ok": False}
+    model = None
+    try:
+        config_class = getattr(transformers, spec["config_class"])
+        model_class = getattr(transformers, spec["model_class"])
+        config = config_class(**spec["kwargs"])
+        config._attn_implementation = "sdpa"
+
+        torch.manual_seed(fixture["seed"] + index)
+        model = model_class(config).eval()
+        recorder = OpRecorder()
+        with torch.no_grad(), recorder:
+            cpu_outputs = model(**model_inputs(name, "cpu"))
+        expected = getattr(cpu_outputs, spec["output"]).detach().clone()
+        entry["cpu_shape"] = list(expected.shape)
+        entry["cpu_ops"] = sorted(recorder.ops)
+        entry["cpu_op_counts"] = dict(sorted(recorder.counts.items()))
+        entry["cpu_ops_without_webgpu_kernel"] = sorted(
+            op for op in recorder.ops if has_webgpu_kernel(op) is False
+        )
+        if name in ("qwen2", "llama", "mistral", "phi3"):
+            assert recorder.counts.get("aten::rms_norm", 0) == 0
+            assert recorder.counts.get("aten::pow.Tensor_Scalar", 0) == 3
+            assert recorder.counts.get("aten::mean.dim", 0) == 3
+            assert recorder.counts.get("aten::rsqrt", 0) == 3
+            entry["cpu_rms_norm_path"] = "unmodified_upstream_composition"
+        if name in ("gpt2", "bert", "opt"):
+            # These three matrix rows are the affine LayerNorm acceptance gate;
+            # decoder-only RMSNorm rows do not exercise native_layer_norm.
+            assert "aten::native_layer_norm" in recorder.ops
+            entry["native_layer_norm_kernel"] = has_webgpu_kernel(
+                "aten::native_layer_norm"
+            )
+            assert entry["native_layer_norm_kernel"] is not False
+
+        model.to("webgpu")
+        before = torch.webgpu.diagnostics()
+        batch = getattr(torch.webgpu, "batch", contextlib.nullcontext)
+        gpu_recorder = OpRecorder()
+        with torch.no_grad(), batch(), gpu_recorder:
+            gpu_outputs = model(**model_inputs(name, "webgpu"))
+        actual = await torch.webgpu.to_cpu_async(
+            getattr(gpu_outputs, spec["output"])
+        )
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-4)
+        after = torch.webgpu.diagnostics()
+        entry["dispatches"] = int(after["dispatches"] - before["dispatches"])
+        entry["readbacks"] = int(after["readbacks"] - before["readbacks"])
+        entry["cpu_fallbacks"] = int(
+            after["cpu_fallbacks"] - before["cpu_fallbacks"]
+        )
+        entry["gpu_ops"] = sorted(gpu_recorder.ops)
+        entry["gpu_op_counts"] = dict(sorted(gpu_recorder.counts.items()))
+        if name in ("qwen2", "llama", "mistral", "phi3"):
+            fused_calls = gpu_recorder.counts.get("aten::rms_norm", 0)
+            assert fused_calls == 3, (name, gpu_recorder.counts)
+            assert gpu_recorder.counts.get("aten::pow.Tensor_Scalar", 0) == 0
+            assert gpu_recorder.counts.get("aten::mean.dim", 0) == 0
+            assert gpu_recorder.counts.get("aten::rsqrt", 0) == 0
+            entry["fused_rms_norm_calls"] = fused_calls
+            entry["rms_norm_logical_dispatches_saved"] = fused_calls * 5
+        if name == "opt":
+            assert gpu_recorder.counts.get("aten::all", 0) == 0
+            assert gpu_recorder.counts.get("aten::eq.Scalar", 0) == 0
+            assert gpu_recorder.counts.get("aten::_local_scalar_dense", 0) == 0
+            entry["host_mask_truth_readbacks_avoided"] = 1
+        assert entry["dispatches"] > 0
+        assert entry["readbacks"] == 1
+        assert entry["cpu_fallbacks"] == 0
+        entry["ok"] = True
+    except BaseException as error:
+        entry["error_type"] = type(error).__name__
+        entry["error"] = str(error)
+        entry["traceback"] = traceback.format_exc(limit=12)
+    finally:
+        row_validation_error = await js.webgpuTestDevice.popErrorScope()
+        if row_validation_error:
+            entry["validation_error"] = row_validation_error.message
+            if "error" not in entry:
+                entry["error_type"] = "WebGPUValidationError"
+                entry["error"] = row_validation_error.message
+            entry["ok"] = False
+        js.webgpuTestDevice.pushErrorScope("validation")
+        del model
+        gc.collect()
+    results.append(entry)
+
+{
+    "transformers_version": transformers.__version__,
+    "huggingface_hub_version": importlib.metadata.version("huggingface-hub"),
+    "tokenizers_available": is_tokenizers_available(),
+    "optional_gguf_disabled": gguf_disabled,
+    "webgpu_rms_norm_fusion": rms_norm_fusion,
+    "webgpu_rms_norm_fusion_repeat": rms_norm_fusion_repeat,
+    "webgpu_rotary_scaling_compatibility": rotary_scaling_compatibility,
+    "webgpu_rotary_scaling_compatibility_repeat": (
+        rotary_scaling_compatibility_repeat
+    ),
+    "webgpu_swiglu_fusion": swiglu_fusion,
+    "webgpu_swiglu_fusion_repeat": swiglu_fusion_repeat,
+    "webgpu_opt_sdpa_mask_compatibility": opt_sdpa_mask_compatibility,
+    "webgpu_opt_sdpa_mask_compatibility_repeat": (
+        opt_sdpa_mask_compatibility_repeat
+    ),
+    "webgpu_preallocated_kv_cache": preallocated_kv_cache,
+    "webgpu_preallocated_kv_cache_repeat": preallocated_kv_cache_repeat,
+    "preallocated_kv_cache_probe": cache_probe,
+    "q8_conversion_probe": q8_probe,
+    "rms_norm_probes": rms_norm_probes,
+    "rotary_scaling_probes": rotary_scaling_probes,
+    "swiglu_probes": swiglu_probes,
+    "rms_norm_only": bool(js.webgpuTestRmsNormOnly),
+    "models": results,
+}
+`);
+    const diagnostics = result.toJs({ dict_converter: Object.fromEntries });
+    result.destroy();
+    window.webgpuTest.diagnostics = diagnostics;
+    const validationError = await device.popErrorScope();
+    if (validationError !== null) {
+      window.webgpuTest.validationErrors.push(validationError.message);
+    }
+    const failedModels = diagnostics.models.filter((model) => !model.ok);
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+    if (failedModels.length !== 0) {
+      throw new Error(
+        `Transformers failures: ${failedModels
+          .map((model) => `${model.name}: ${model.error}`)
+          .join("; ")}`,
+      );
+    }
+    window.webgpuTest = {
+      done: true,
+      ok: true,
+      message: diagnostics.rms_norm_only
+        ? "Hermetic Transformers RMSNorm WebGPU probe passed"
+        : "Hermetic Transformers WebGPU test passed",
+      validationErrors: [],
+      diagnostics,
+    };
+    report(JSON.stringify(window.webgpuTest, null, 2));
+  } catch (error) {
+    const message =
+      error instanceof Error ? `${error.stack ?? error}` : String(error);
+    window.webgpuTest.done = true;
+    window.webgpuTest.ok = false;
+    window.webgpuTest.message = message;
+    console.error(message);
+  }
+</script>

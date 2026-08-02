@@ -1,0 +1,178 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU JSPI readback test</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    if (!wheel || !filelockWheel) {
+      throw new Error("wheel query parameters are missing");
+    }
+    const adapter = await navigator.gpu?.requestAdapter();
+    if (adapter === null || adapter === undefined) {
+      throw new Error("WebGPU adapter unavailable");
+    }
+    const device = await adapter.requestDevice();
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    window.webgpuTestDevice = device;
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import gc
+
+import js
+import torch
+import torch.webgpu
+from pyodide.ffi import can_run_sync
+
+assert can_run_sync(), "runPythonAsync did not enable JSPI stack switching"
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+float_values = [1.25, -2.5, 3.75]
+float_gpu = torch.tensor(float_values, dtype=torch.float32).to("webgpu")
+float_async = await torch.webgpu.to_cpu_async(float_gpu)
+float_sync = torch.webgpu.to_cpu_sync(float_gpu)
+float_method = float_gpu.cpu(memory_format=torch.preserve_format)
+
+int_values = [[3, -7], [11, 19]]
+int_gpu = torch.tensor(int_values, dtype=torch.int32).to("webgpu")
+int_async = await torch.webgpu.to_cpu_async(int_gpu)
+int_sync = torch.webgpu.to_cpu_sync(int_gpu)
+int_method = int_gpu.cpu()
+
+long_values = [[-2, 0], [17, 2**31 - 1]]
+long_gpu = torch.tensor(long_values, dtype=torch.long).to("webgpu")
+long_async = await torch.webgpu.to_cpu_async(long_gpu)
+long_sync = torch.webgpu.to_cpu_sync(long_gpu)
+long_method = long_gpu.cpu()
+
+# Each readback owns its CPU storage after the temporary NumPy array dies.
+gc.collect()
+assert float_async.tolist() == float_values
+assert float_sync.tolist() == float_values
+assert float_method.tolist() == float_values
+assert int_async.tolist() == int_values
+assert int_sync.tolist() == int_values
+assert int_method.tolist() == int_values
+assert long_async.tolist() == long_values
+assert long_sync.tolist() == long_values
+assert long_method.tolist() == long_values
+assert float_gpu[:1].item() == float_values[0]
+
+# The global Tensor method wrappers must preserve ordinary CPU behavior.
+cpu_vector = torch.tensor([2.0, 4.0])
+cpu_scalar = torch.tensor(9)
+assert cpu_vector.cpu() is cpu_vector
+assert cpu_scalar.item() == 9
+
+def sync_readback():
+    return float_gpu.cpu().tolist()
+
+{
+    "can_run_sync": can_run_sync(),
+    "float32": float_method.tolist(),
+    "int32": int_method.tolist(),
+    "int64": long_method.tolist(),
+    "item": float_gpu[:1].item(),
+}
+`);
+    const diagnostics = result.toJs({ dict_converter: Object.fromEntries });
+    result.destroy();
+
+    const expectSyncEntrypointFailure = (operation, label) => {
+      try {
+        operation();
+      } catch (error) {
+        const message = String(error);
+        for (const required of [
+          "runPythonAsync()",
+          "callPromising()",
+          "to_cpu_async",
+        ]) {
+          if (!message.includes(required)) {
+            throw new Error(`${label} omitted ${required}: ${message}`);
+          }
+        }
+        return message;
+      }
+      throw new Error(`${label} unexpectedly allowed synchronous readback`);
+    };
+
+    diagnostics.runPythonFallback = expectSyncEntrypointFailure(
+      () => pyodide.runPython("float_gpu.cpu()"),
+      "runPython",
+    );
+    const syncReadback = pyodide.globals.get("sync_readback");
+    try {
+      diagnostics.directPyProxyFallback = expectSyncEntrypointFailure(
+        () => syncReadback(),
+        "direct PyProxy call",
+      );
+      const promisingResult = await syncReadback.callPromising();
+      diagnostics.callPromising = promisingResult.toJs();
+      promisingResult.destroy();
+    } finally {
+      syncReadback.destroy();
+    }
+    if (
+      JSON.stringify(diagnostics.callPromising) !==
+      JSON.stringify(diagnostics.float32)
+    ) {
+      throw new Error("callPromising readback returned unexpected values");
+    }
+    const validationError = await device.popErrorScope();
+    if (validationError !== null) {
+      window.webgpuTest.validationErrors.push(validationError.message);
+    }
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+    window.webgpuTest = {
+      done: true,
+      ok: true,
+      message: "JSPI WebGPU readback test passed",
+      validationErrors: [],
+      diagnostics,
+    };
+    report(JSON.stringify(window.webgpuTest, null, 2));
+  } catch (error) {
+    const message =
+      error instanceof Error ? `${error.stack ?? error}` : String(error);
+    window.webgpuTest.done = true;
+    window.webgpuTest.ok = false;
+    window.webgpuTest.message = message;
+    console.error(message);
+  }
+</script>

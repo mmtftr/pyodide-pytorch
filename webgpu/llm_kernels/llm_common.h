@@ -46,9 +46,11 @@ inline void check_inference_tensor(
         tensor.scalar_type());
   } else {
     TORCH_CHECK(
-        tensor.scalar_type() == at::kFloat || tensor.scalar_type() == at::kInt,
+        tensor.scalar_type() == at::kFloat || tensor.scalar_type() == at::kInt ||
+            tensor.scalar_type() == at::kLong || tensor.scalar_type() == at::kBool,
         operation,
-        " supports only torch.float32 and torch.int32");
+        " supports only torch.float32, torch.int32, signed-int32-valued "
+        "torch.int64, and byte-packed torch.bool");
   }
   TORCH_CHECK(
       !at::GradMode::is_enabled() || !tensor.requires_grad(),
@@ -198,5 +200,10 @@ inline std::int64_t product(c10::IntArrayRef sizes) {
   }
   return result;
 }
+
+// GPU-only copy used when an operator's output aliases one of its inputs.
+// WebGPU does not allow one buffer to be bound for both read-only and writable
+// storage in the same compute pass.
+void copy_strided(const at::Tensor& source, at::Tensor& destination);
 
 } // namespace pyodide_pytorch::webgpu::llm

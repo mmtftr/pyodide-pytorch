@@ -35,6 +35,10 @@ std::vector<std::int64_t> validate_normalized_shape(
     const at::Tensor& input,
     c10::SymIntArrayRef normalized_shape,
     const char* operation) {
+  TORCH_CHECK(
+      input.dim() <= 8,
+      operation,
+      " supports tensors with at most 8 dimensions");
   auto shape = concrete_sizes(normalized_shape);
   TORCH_CHECK(!shape.empty() && shape.size() <= static_cast<std::size_t>(input.dim()),
       operation, " received an invalid normalized_shape");
@@ -95,9 +99,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_impl(
   statistic_shape.insert(statistic_shape.end(), shape.size(), 1);
   auto mean = at::empty(statistic_shape, input.options());
   auto rstd = at::empty(statistic_shape, input.options());
-  if (input.numel() == 0) {
-    return {output, mean, rstd};
-  }
 
   at::Tensor contiguous_weight;
   at::Tensor contiguous_bias;
@@ -105,12 +106,21 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_impl(
     check_inference_tensor(*weight, "WebGPU layer_norm weight", at::kFloat);
     TORCH_CHECK(weight->sizes() == at::IntArrayRef(shape),
         "WebGPU layer_norm weight shape mismatch");
-    contiguous_weight = weight->is_contiguous() ? *weight : weight->contiguous();
   }
   if (bias && bias->defined()) {
     check_inference_tensor(*bias, "WebGPU layer_norm bias", at::kFloat);
     TORCH_CHECK(bias->sizes() == at::IntArrayRef(shape),
         "WebGPU layer_norm bias shape mismatch");
+  }
+  // Match ATen's validation order for empty prefix dimensions: an empty
+  // output does not dispatch, but malformed affine tensors still fail.
+  if (input.numel() == 0) {
+    return {output, mean, rstd};
+  }
+  if (weight && weight->defined()) {
+    contiguous_weight = weight->is_contiguous() ? *weight : weight->contiguous();
+  }
+  if (bias && bias->defined()) {
     contiguous_bias = bias->is_contiguous() ? *bias : bias->contiguous();
   }
   const auto [dispatch_x, dispatch_y] =

@@ -1,0 +1,307 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU SDPA benchmark</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    if (!wheel || !filelockWheel || !navigator.gpu) {
+      throw new Error("WebGPU or benchmark wheel parameters are unavailable");
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null) throw new Error("requestAdapter returned null");
+    const device = await adapter.requestDevice();
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    window.webgpuTestDevice = device;
+    window.webgpuTest.adapter = {
+      architecture: adapter.info?.architecture ?? "",
+      description: adapter.info?.description ?? "",
+      device: adapter.info?.device ?? "",
+      vendor: adapter.info?.vendor ?? "",
+    };
+    report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import json
+import math
+import statistics
+import time
+
+import js
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.webgpu
+
+assert torch.webgpu.is_available()
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+def values(shape, offset):
+    count = math.prod(shape)
+    return ((torch.arange(count, dtype=torch.float32) % 97) - 48).reshape(shape) * 0.007 + offset
+
+def make_case(name, query_heads, key_value_heads, query_length, key_value_length,
+              head_dim, causal, gqa=False, mask_mode=None, strided=False,
+              strided_mask=False):
+    query = values((1, query_heads, query_length, head_dim), 0.01)
+    key = values((1, key_value_heads, key_value_length, head_dim), -0.02)
+    value = values((1, key_value_heads, key_value_length, head_dim), 0.03)
+    if strided:
+        # These transposes are metadata views with the required logical shape,
+        # exercising the shader's arbitrary-stride input paths.
+        query = values((1, query_length, query_heads, head_dim), 0.01).permute(0, 2, 1, 3)
+        key = values((1, key_value_length, key_value_heads, head_dim), -0.02).permute(0, 2, 1, 3)
+        value = values((1, key_value_length, key_value_heads, head_dim), 0.03).permute(0, 2, 1, 3)
+    mask = None
+    if mask_mode == "pattern":
+        if strided_mask:
+            mask = torch.zeros(
+                (1, 1, key_value_length, query_length), dtype=torch.float32
+            ).permute(0, 1, 3, 2)
+        else:
+            mask = torch.zeros(
+                (1, 1, query_length, key_value_length), dtype=torch.float32
+            )
+        mask[..., ::5] = -10.0
+    elif mask_mode == "all":
+        # Rank-2 tests right-aligned broadcasting as well as the zero-output
+        # convention for a row whose additive mask is entirely -inf.
+        mask = torch.full(
+            (query_length, key_value_length), -float("inf"), dtype=torch.float32
+        )
+    return {
+        "name": name,
+        "query": query,
+        "key": key,
+        "value": value,
+        "mask": mask,
+        "causal": causal,
+        "gqa": gqa,
+        "strided": strided,
+        "strided_mask": strided_mask,
+    }
+
+def to_webgpu(tensor, strided=False):
+    if not strided:
+        return tensor.to("webgpu")
+    # CPU uploads are deliberately contiguous.  Recreate the metadata view on
+    # the device so the SDPA kernel, rather than the upload path, owns the
+    # strided-input test.
+    return tensor.permute(0, 2, 1, 3).to("webgpu").permute(0, 2, 1, 3)
+
+def mask_to_webgpu(mask, strided=False):
+    if not strided:
+        return mask.to("webgpu")
+    return mask.permute(0, 1, 3, 2).to("webgpu").permute(0, 1, 3, 2)
+
+async def to_numpy_async(tensor):
+    # Keep benchmark correctness independent of torch.from_numpy: the current
+    # Pyodide 3.14 wheel has a separate NumPy bridge regression after a valid
+    # GPU readback. This is the same raw WebGPU copy/map path used by
+    # torch.webgpu.to_cpu_async, returning the copied NumPy array directly.
+    torch.webgpu._flush()
+    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
+    state = torch.webgpu._state()
+    source = state.buffers.get(int(torch.ops.webgpu.buffer_id(tensor)))
+    descriptor = js.Object.new()
+    descriptor.label = "SDPA benchmark readback"
+    descriptor.size = max(4, nbytes)
+    descriptor.usage = 0x0001 | 0x0008
+    readback = state.device.createBuffer(descriptor)
+    encoder = state.device.createCommandEncoder()
+    encoder.copyBufferToBuffer(
+        source, int(tensor.storage_offset()) * tensor.element_size(),
+        readback, 0, max(4, nbytes),
+    )
+    commands = js.Array.new()
+    commands.push(encoder.finish())
+    state.queue.submit(commands)
+    await readback.mapAsync(js.GPUMapMode.READ)
+    try:
+        byte_view = js.Uint8Array.new(readback.getMappedRange(0, max(4, nbytes)))
+        return np.frombuffer(
+            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
+        ).copy().reshape(tuple(tensor.shape))
+    finally:
+        readback.unmap()
+        readback.destroy()
+
+cases = [
+    make_case("mha-causal-d64-s16", 4, 4, 16, 16, 64, True),
+    make_case("mha-causal-d128-s64", 4, 4, 64, 64, 128, True),
+    make_case(
+        "gqa-causal-strided-d128-q33-k65", 8, 2, 33, 65, 128, True,
+        gqa=True, strided=True,
+    ),
+    make_case(
+        "gqa-long-strided-d128-q16-k513", 8, 2, 16, 513, 128, False,
+        gqa=True, strided=True,
+    ),
+    make_case(
+        "masked-strided-d64-q7-k513", 4, 4, 7, 513, 64, False,
+        mask_mode="pattern", strided_mask=True,
+    ),
+    make_case(
+        "all-masked-d64-q3-k256", 2, 2, 3, 256, 64, False,
+        mask_mode="all",
+    ),
+    # is_causal is the upper-left lower triangle and remains valid when Q > K.
+    make_case("mha-causal-d64-q9-k5", 2, 2, 9, 5, 64, True),
+]
+
+reports = []
+with torch.no_grad():
+    before = torch.webgpu.diagnostics()
+    for case in cases:
+        expected = F.scaled_dot_product_attention(
+            case["query"], case["key"], case["value"], case["mask"],
+            dropout_p=0.0, is_causal=case["causal"], enable_gqa=case["gqa"],
+        )
+        actual_gpu = F.scaled_dot_product_attention(
+            to_webgpu(case["query"], case["strided"]),
+            to_webgpu(case["key"], case["strided"]),
+            to_webgpu(case["value"], case["strided"]),
+            None if case["mask"] is None else mask_to_webgpu(
+                case["mask"], case["strided_mask"]
+            ),
+            dropout_p=0.0, is_causal=case["causal"], enable_gqa=case["gqa"],
+        )
+        actual = await to_numpy_async(actual_gpu)
+        np.testing.assert_allclose(
+            actual, expected.numpy(), rtol=3e-4, atol=3e-5
+        )
+        reports.append({"name": case["name"], "shape": list(actual.shape)})
+    after = torch.webgpu.diagnostics()
+    assert after["dispatches"] - before["dispatches"] == len(cases)
+
+    timed_cases = [
+        (make_case(
+            "decode-gqa-d64-q1-k513", 8, 2, 1, 513, 64, False,
+            gqa=True,
+        ), 32),
+        (make_case(
+            "decode-gqa-d128-q1-k513", 8, 2, 1, 513, 128, False,
+            gqa=True,
+        ), 32),
+        (make_case(
+            "prefill-mha-d64-s128", 4, 4, 128, 128, 64, True,
+        ), 4),
+        (make_case(
+            "prefill-gqa-d128-s128", 8, 2, 128, 128, 128, True,
+            gqa=True,
+        ), 4),
+        (next(
+            case for case in cases
+            if case["name"] == "gqa-long-strided-d128-q16-k513"
+        ), 8),
+    ]
+    timing_reports = []
+    sample_count = 11
+    for timed, repeats in timed_cases:
+        q = to_webgpu(timed["query"], timed["strided"])
+        k = to_webgpu(timed["key"], timed["strided"])
+        v = to_webgpu(timed["value"], timed["strided"])
+        for _ in range(3):
+            F.scaled_dot_product_attention(
+                q, k, v, dropout_p=0.0, is_causal=timed["causal"],
+                enable_gqa=timed["gqa"],
+            )
+        await torch.webgpu.synchronize()
+        samples = []
+        for _ in range(sample_count):
+            start = time.perf_counter()
+            for _ in range(repeats):
+                F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=0.0, is_causal=timed["causal"],
+                    enable_gqa=timed["gqa"],
+                )
+            await torch.webgpu.synchronize()
+            samples.append((time.perf_counter() - start) * 1000 / repeats)
+        median_ms = statistics.median(samples)
+        query_length = timed["query"].shape[2]
+        key_length = timed["key"].shape[2]
+        if timed["causal"]:
+            active_pairs = sum(
+                min(key_length, query_index + 1)
+                for query_index in range(query_length)
+            )
+        else:
+            active_pairs = query_length * key_length
+        # Two multiply-add matrices over the keys which can actually
+        # contribute: QK^T and softmax(QK^T)V.
+        estimated_flops = 4 * math.prod((
+            timed["query"].shape[0], timed["query"].shape[1],
+            active_pairs, timed["query"].shape[3],
+        ))
+        timing_reports.append({
+            "name": timed["name"],
+            "median_ms": median_ms,
+            "min_ms": min(samples),
+            "max_ms": max(samples),
+            "estimated_gflops": estimated_flops / (median_ms * 1e6),
+            "samples": sample_count,
+            "repeats_per_sample": repeats,
+        })
+
+assert torch.webgpu.cpu_fallbacks() == 0
+json.dumps({
+    "cases": reports,
+    "timings": timing_reports,
+    "adapter": dict(js.webgpuTest.adapter.to_py()),
+    "diagnostics": torch.webgpu.diagnostics(),
+})
+`);
+    await device.queue.onSubmittedWorkDone();
+    const scopedError = await device.popErrorScope();
+    if (scopedError !== null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+    window.webgpuTest.result = JSON.parse(result);
+    window.webgpuTest.ok = true;
+    window.webgpuTest.message = "WebGPU SDPA benchmark passed";
+    report(window.webgpuTest.message);
+  } catch (error) {
+    window.webgpuTest.message = error?.stack ?? String(error);
+    console.error(window.webgpuTest.message);
+  } finally {
+    window.webgpuTest.done = true;
+  }
+</script>

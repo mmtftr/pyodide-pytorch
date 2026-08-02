@@ -1,0 +1,509 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PyTorch WebGPU performance grid</title>
+<pre id="status">starting</pre>
+<script type="module">
+  import { loadPyodide } from "/pyodide/pyodide.mjs";
+
+  const status = document.querySelector("#status");
+  const report = (message) => {
+    status.textContent += `\n${message}`;
+    console.log(message);
+  };
+  const gpuLimitNames = [
+    "maxBindGroups",
+    "maxBufferSize",
+    "maxComputeInvocationsPerWorkgroup",
+    "maxComputeWorkgroupSizeX",
+    "maxComputeWorkgroupSizeY",
+    "maxComputeWorkgroupSizeZ",
+    "maxComputeWorkgroupsPerDimension",
+    "maxStorageBufferBindingSize",
+    "maxUniformBufferBindingSize",
+  ];
+  const adapterDetails = (adapter, device, mode) => ({
+    mode,
+    userAgent: navigator.userAgent,
+    architecture: adapter.info?.architecture ?? "",
+    description: adapter.info?.description ?? "",
+    device: adapter.info?.device ?? "",
+    vendor: adapter.info?.vendor ?? "",
+    subgroupMinSize: adapter.info?.subgroupMinSize ?? null,
+    subgroupMaxSize: adapter.info?.subgroupMaxSize ?? null,
+    adapterFeatures: [...adapter.features].sort(),
+    deviceFeatures: [...device.features].sort(),
+    limits: Object.fromEntries(
+      gpuLimitNames
+        .filter((name) => adapter.limits[name] !== undefined)
+        .map((name) => [name, adapter.limits[name]]),
+    ),
+  });
+
+  function makeTimestampProfiler(device, requestedCapacity = 2048) {
+    const capacity = Math.min(
+      requestedCapacity,
+      Math.floor((device.limits.maxQueryCount ?? 4096) / 2),
+    );
+    const stride = 256;
+    const querySet = device.createQuerySet({
+      type: "timestamp",
+      count: capacity * 2,
+    });
+    const resolveBuffer = device.createBuffer({
+      label: "PyTorch WebGPU benchmark timestamp resolve buffer",
+      size: capacity * stride,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+    });
+    let count = 0;
+
+    const wrappedDevice = new Proxy(device, {
+      get(target, property) {
+        if (property !== "createCommandEncoder") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (descriptor) => {
+          const encoder = target.createCommandEncoder(descriptor);
+          const slots = [];
+          return new Proxy(encoder, {
+            get(encoderTarget, encoderProperty) {
+              if (encoderProperty === "beginComputePass") {
+                return (passDescriptor) => {
+                  if (count >= capacity) {
+                    throw new Error("WebGPU timestamp benchmark capacity exceeded");
+                  }
+                  const slot = count++;
+                  slots.push(slot);
+                  return encoderTarget.beginComputePass({
+                    ...(passDescriptor ?? {}),
+                    timestampWrites: {
+                      querySet,
+                      beginningOfPassWriteIndex: slot * 2,
+                      endOfPassWriteIndex: slot * 2 + 1,
+                    },
+                  });
+                };
+              }
+              if (encoderProperty === "finish") {
+                return (finishDescriptor) => {
+                  for (const slot of slots) {
+                    encoderTarget.resolveQuerySet(
+                      querySet,
+                      slot * 2,
+                      2,
+                      resolveBuffer,
+                      slot * stride,
+                    );
+                  }
+                  return encoderTarget.finish(finishDescriptor);
+                };
+              }
+              const value = Reflect.get(
+                encoderTarget,
+                encoderProperty,
+                encoderTarget,
+              );
+              return typeof value === "function"
+                ? value.bind(encoderTarget)
+                : value;
+            },
+          });
+        };
+      },
+    });
+
+    return {
+      device: wrappedDevice,
+      get count() {
+        return count;
+      },
+      async readMilliseconds() {
+        await device.queue.onSubmittedWorkDone();
+        if (count === 0) return [];
+        const byteLength = count * stride;
+        const readback = device.createBuffer({
+          label: "PyTorch WebGPU benchmark timestamp readback",
+          size: byteLength,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        const encoder = device.createCommandEncoder();
+        encoder.copyBufferToBuffer(resolveBuffer, 0, readback, 0, byteLength);
+        device.queue.submit([encoder.finish()]);
+        await readback.mapAsync(GPUMapMode.READ);
+        try {
+          const words = new BigUint64Array(readback.getMappedRange());
+          return Array.from({ length: count }, (_, slot) => {
+            const base = (slot * stride) / BigUint64Array.BYTES_PER_ELEMENT;
+            return Number(words[base + 1] - words[base]) / 1_000_000;
+          });
+        } finally {
+          readback.unmap();
+          readback.destroy();
+        }
+      },
+    };
+  }
+
+  window.webgpuTest = {
+    done: false,
+    ok: false,
+    message: "starting",
+    validationErrors: [],
+  };
+
+  try {
+    const parameters = new URLSearchParams(window.location.search);
+    const wheel = parameters.get("wheel");
+    const filelockWheel = parameters.get("filelock");
+    const adapterMode = parameters.get("adapter") ?? "swiftshader";
+    const timestampsRequested = parameters.get("timestamps") === "1";
+    const extended = parameters.get("extended") === "1";
+    const batchOperations = parameters.get("batch") === "1";
+    if (!wheel || !filelockWheel || !navigator.gpu) {
+      throw new Error("WebGPU or performance-grid wheel parameters are unavailable");
+    }
+    const adapter = await navigator.gpu.requestAdapter({
+      powerPreference: "high-performance",
+    });
+    if (adapter === null) throw new Error("requestAdapter returned null");
+    const timestampsEnabled =
+      timestampsRequested && adapter.features.has("timestamp-query");
+    const requiredFeatures = timestampsEnabled ? ["timestamp-query"] : [];
+    if (adapter.features.has("subgroups")) requiredFeatures.push("subgroups");
+    const device = await adapter.requestDevice({ requiredFeatures });
+    window.webgpuRawDevice = device;
+    device.pushErrorScope("validation");
+    device.addEventListener("uncapturederror", (event) => {
+      const message = event.error?.message ?? String(event.error);
+      window.webgpuTest.validationErrors.push(message);
+      console.error(`uncaptured WebGPU error: ${message}`);
+    });
+    const timestampProfiler = timestampsEnabled
+      ? makeTimestampProfiler(device)
+      : null;
+    window.webgpuTestDevice = timestampProfiler?.device ?? device;
+    window.webgpuTimestampCount = () => timestampProfiler?.count ?? 0;
+    window.webgpuTest.adapter = adapterDetails(adapter, device, adapterMode);
+    window.webgpuTest.adapter.timestampsRequested = timestampsRequested;
+    window.webgpuTest.adapter.timestampsEnabled = timestampsEnabled;
+    window.webgpuTest.adapter.extended = extended;
+    window.webgpuTest.adapter.batchOperations = batchOperations;
+    report(`adapter: ${JSON.stringify(window.webgpuTest.adapter)}`);
+
+    const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
+    await pyodide.loadPackage([
+      "numpy",
+      "typing-extensions",
+      "sympy",
+      "networkx",
+      "jinja2",
+      "fsspec",
+    ]);
+    await pyodide.loadPackage(`/dependency/${filelockWheel}`);
+    await pyodide.loadPackage(`/wheel/${wheel}`);
+
+    const result = await pyodide.runPythonAsync(`
+import json
+import statistics
+import time
+
+import js
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.webgpu
+
+
+assert torch.webgpu.is_available()
+await torch.webgpu.init(device=js.webgpuTestDevice)
+
+adapter = dict(js.webgpuTest.adapter.to_py())
+software_adapter = adapter["mode"] == "swiftshader"
+extended = bool(adapter["extended"]) and not software_adapter
+batch_operations = bool(adapter["batchOperations"])
+# Keep portable CI small while preserving every workload category. Hardware
+# measurements amortize browser scheduling noise with more batches.
+samples = 3 if software_adapter else 7
+
+
+def median(values):
+    return float(statistics.median(values))
+
+
+def diagnostic_delta(before, after):
+    names = (
+        "dispatches",
+        "buffer_allocations",
+        "buffer_releases",
+        "command_submissions",
+        "uploads",
+        "gpu_copies",
+        "shader_compilations",
+        "pipeline_creations",
+        "command_encoder_creations",
+        "command_buffer_creations",
+        "readbacks",
+        "command_buffers_submitted",
+        "physical_command_buffers_submitted",
+        "batched_command_buffers",
+        "batch_flushes",
+    )
+    return {
+        name: int(after.get(name, 0) - before.get(name, 0))
+        for name in names
+    }
+
+
+async def to_numpy_async(tensor):
+    # Keep benchmark correctness independent of torch.from_numpy: the current
+    # Pyodide 3.14 wheel has a separate NumPy bridge regression after a valid
+    # GPU readback. This is the same raw WebGPU copy/map path used by
+    # torch.webgpu.to_cpu_async, returning the copied NumPy array directly.
+    torch.webgpu._flush()
+    nbytes = int(torch.ops.webgpu.buffer_nbytes(tensor))
+    state = torch.webgpu._state()
+    source = state.buffers.get(int(torch.ops.webgpu.buffer_id(tensor)))
+    descriptor = js.Object.new()
+    descriptor.label = "performance grid readback"
+    descriptor.size = max(4, nbytes)
+    descriptor.usage = 0x0001 | 0x0008
+    readback = state.device.createBuffer(descriptor)
+    encoder = state.device.createCommandEncoder()
+    encoder.copyBufferToBuffer(
+        source, int(tensor.storage_offset()) * tensor.element_size(),
+        readback, 0, max(4, nbytes),
+    )
+    commands = js.Array.new()
+    commands.push(encoder.finish())
+    state.queue.submit(commands)
+    await readback.mapAsync(js.GPUMapMode.READ)
+    try:
+        byte_view = js.Uint8Array.new(readback.getMappedRange(0, max(4, nbytes)))
+        return np.frombuffer(
+            byte_view.to_py(), dtype=np.float32, count=tensor.numel()
+        ).copy().reshape(tuple(tensor.shape))
+    finally:
+        readback.unmap()
+        readback.destroy()
+
+
+async def timed_case(name, category, shape, repeats, operation, expected):
+    # Compile pipelines and establish steady-state allocation behavior before
+    # both the spot check and queued-and-synchronized timing samples. Hardware
+    # gets a longer warmup so GPU clock ramp does not dominate the first cases.
+    for _ in range(1 if software_adapter else 12):
+        operation()
+    await torch.webgpu.synchronize()
+
+    single_before = torch.webgpu.diagnostics()
+    output = operation()
+    await torch.webgpu.synchronize()
+    single_after = torch.webgpu.diagnostics()
+    single_diagnostics = diagnostic_delta(single_before, single_after)
+    assert single_diagnostics["dispatches"] >= 1, (name, single_diagnostics)
+    assert single_diagnostics["command_submissions"] >= 1, (name, single_diagnostics)
+
+    actual = await to_numpy_async(output)
+    np.testing.assert_allclose(
+        actual, expected.numpy(), rtol=3e-4, atol=3e-5
+    )
+
+    sample_milliseconds = []
+    batch_deltas = []
+    timestamp_ranges = []
+    for _ in range(samples):
+        before = torch.webgpu.diagnostics()
+        timestamp_start = int(js.webgpuTimestampCount())
+        started = time.perf_counter()
+        if batch_operations:
+            with torch.webgpu.batch():
+                for _ in range(repeats):
+                    output = operation()
+        else:
+            for _ in range(repeats):
+                output = operation()
+        await torch.webgpu.synchronize()
+        elapsed = (time.perf_counter() - started) * 1000 / repeats
+        timestamp_end = int(js.webgpuTimestampCount())
+        after = torch.webgpu.diagnostics()
+        sample_milliseconds.append(elapsed)
+        batch_deltas.append(diagnostic_delta(before, after))
+        timestamp_ranges.append([timestamp_start, timestamp_end])
+
+    per_call_median = {
+        field: median([delta[field] / repeats for delta in batch_deltas])
+        for field in batch_deltas[0]
+    }
+    return {
+        "name": name,
+        "category": category,
+        "shape": shape,
+        "samples": samples,
+        "repeats_per_sample": repeats,
+        "timing": {
+            "kind": "wall_clock_queued_and_synchronized",
+            "ms_per_call_samples": sample_milliseconds,
+            "median_ms_per_call": median(sample_milliseconds),
+        },
+        "single_call_diagnostics": single_diagnostics,
+        "median_diagnostics_per_call": per_call_median,
+        "gpu_timestamp_ranges": timestamp_ranges,
+    }
+
+
+def values(shape, modulus, scale):
+    return ((torch.arange(torch.tensor(shape).prod(), dtype=torch.float32) % modulus)
+            - modulus // 2).reshape(shape) * scale
+
+
+results = []
+with torch.no_grad():
+    # Prefill projects multiple tokens per call; M=1 separately models decode.
+    for rows in (8, 32, 128):
+        inner, columns = 256, 768
+        input_cpu = values((rows, inner), 127, 0.002)
+        weight_cpu = values((columns, inner), 113, 0.001)
+        bias_cpu = values((columns,), 31, 0.001)
+        input_gpu = input_cpu.to("webgpu")
+        weight_gpu = weight_cpu.to("webgpu")
+        bias_gpu = bias_cpu.to("webgpu")
+        repeats = 1 if software_adapter and rows == 128 else (3 if software_adapter else 12)
+        results.append(await timed_case(
+            f"linear_prefill_m{rows}",
+            "linear_prefill",
+            {"m": rows, "k": inner, "n": columns},
+            repeats,
+            lambda: F.linear(input_gpu, weight_gpu, bias_gpu),
+            F.linear(input_cpu, weight_cpu, bias_cpu),
+        ))
+
+    inner, columns = 256, 768
+    decode_input_cpu = values((1, inner), 127, 0.002)
+    decode_weight_cpu = values((columns, inner), 113, 0.001)
+    decode_bias_cpu = values((columns,), 31, 0.001)
+    decode_input_gpu = decode_input_cpu.to("webgpu")
+    decode_weight_gpu = decode_weight_cpu.to("webgpu")
+    decode_bias_gpu = decode_bias_cpu.to("webgpu")
+    results.append(await timed_case(
+        "linear_decode_m1",
+        "linear_decode",
+        {"m": 1, "k": inner, "n": columns},
+        3 if software_adapter else 24,
+        lambda: F.linear(decode_input_gpu, decode_weight_gpu, decode_bias_gpu),
+        F.linear(decode_input_cpu, decode_weight_cpu, decode_bias_cpu),
+    ))
+
+    # Qwen2.5-0.5B uses width 896 and an MLP intermediate width of 4864.
+    # Reuse one realistic 17.4 MB fp32 weight for a memory-bound decode GEMV
+    # and a compute-heavy 128-token prefill GEMM. Constant tensors make the
+    # CPU correctness oracle cheap without changing GPU memory traffic.
+    if extended:
+        inner, columns = 896, 4864
+        qwen_weight_cpu = torch.full((columns, inner), 0.001)
+        qwen_bias_cpu = torch.full((columns,), 0.01)
+        qwen_weight_gpu = qwen_weight_cpu.to("webgpu")
+        qwen_bias_gpu = qwen_bias_cpu.to("webgpu")
+        for rows, name, repeats in (
+            (1, "linear_qwen_mlp_decode_m1", 12),
+            (128, "linear_qwen_mlp_prefill_m128", 7),
+        ):
+            qwen_input_cpu = torch.full((rows, inner), 0.002)
+            qwen_input_gpu = qwen_input_cpu.to("webgpu")
+            qwen_expected = torch.full(
+                (rows, columns), inner * 0.002 * 0.001 + 0.01
+            )
+            results.append(await timed_case(
+                name,
+                "linear_decode" if rows == 1 else "linear_prefill",
+                {"m": rows, "k": inner, "n": columns, "model": "qwen2.5-0.5b"},
+                repeats,
+                lambda: F.linear(qwen_input_gpu, qwen_weight_gpu, qwen_bias_gpu),
+                qwen_expected,
+            ))
+
+    # Same number of heads and a modest head dimension exercise the native
+    # fused SDPA path without making the SwiftShader correctness run expensive.
+    for name, query_tokens, key_tokens, causal in (
+        ("sdpa_prefill", 32, 32, True),
+        ("sdpa_decode", 1, 32, False),
+    ):
+        batch, heads, head_dim = 1, 4, 32
+        query_cpu = values((batch, heads, query_tokens, head_dim), 97, 0.004)
+        key_cpu = values((batch, heads, key_tokens, head_dim), 89, 0.003)
+        value_cpu = values((batch, heads, key_tokens, head_dim), 83, 0.005)
+        query_gpu = query_cpu.to("webgpu")
+        key_gpu = key_cpu.to("webgpu")
+        value_gpu = value_cpu.to("webgpu")
+        operation = lambda: F.scaled_dot_product_attention(
+            query_gpu, key_gpu, value_gpu, dropout_p=0.0, is_causal=causal
+        )
+        expected = F.scaled_dot_product_attention(
+            query_cpu, key_cpu, value_cpu, dropout_p=0.0, is_causal=causal
+        )
+        results.append(await timed_case(
+            name,
+            "sdpa_prefill" if query_tokens > 1 else "sdpa_decode",
+            {
+                "batch": batch,
+                "heads": heads,
+                "query_tokens": query_tokens,
+                "key_tokens": key_tokens,
+                "head_dim": head_dim,
+                "causal": causal,
+            },
+            2 if software_adapter else 12,
+            operation,
+            expected,
+        ))
+
+assert torch.webgpu.cpu_fallbacks() == 0
+json.dumps({
+    "torch": torch.__version__,
+    "adapter": adapter,
+    "software_adapter": software_adapter,
+    "cases": results,
+    "cpu_fallbacks": torch.webgpu.cpu_fallbacks(),
+    "diagnostics": torch.webgpu.diagnostics(),
+})
+`);
+    await device.queue.onSubmittedWorkDone();
+    const scopedError = await device.popErrorScope();
+    if (scopedError !== null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    if (window.webgpuTest.validationErrors.length !== 0) {
+      throw new Error(window.webgpuTest.validationErrors.join("\n"));
+    }
+    window.webgpuTest.result = JSON.parse(result);
+    if (timestampProfiler !== null) {
+      const timestampMilliseconds = await timestampProfiler.readMilliseconds();
+      for (const benchmarkCase of window.webgpuTest.result.cases) {
+        const samples = benchmarkCase.gpu_timestamp_ranges.map(
+          ([start, end]) =>
+            timestampMilliseconds
+              .slice(start, end)
+              .reduce((total, value) => total + value, 0) /
+            benchmarkCase.repeats_per_sample,
+        );
+        const ordered = [...samples].sort((left, right) => left - right);
+        benchmarkCase.gpu_timing = {
+          kind: "webgpu_timestamp_query",
+          ms_per_call_samples: samples,
+          median_ms_per_call: ordered[Math.floor(ordered.length / 2)],
+        };
+      }
+    }
+    window.webgpuTest.ok = true;
+    window.webgpuTest.message = "WebGPU performance grid passed";
+    report(window.webgpuTest.message);
+  } catch (error) {
+    const scopedError = await window.webgpuRawDevice?.popErrorScope();
+    if (scopedError != null) {
+      window.webgpuTest.validationErrors.push(scopedError.message);
+    }
+    window.webgpuTest.message = error?.stack ?? String(error);
+    console.error(window.webgpuTest.message);
+  } finally {
+    window.webgpuTest.done = true;
+  }
+</script>

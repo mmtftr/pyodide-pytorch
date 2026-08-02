@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000011 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Sat, 1 Aug 2026 14:49:00 +0200
+Subject: [PATCH 11/11] Preserve generated version timestamp when unchanged
+
+The gen_torch_version target intentionally has no inputs and runs on every
+build, while torch_python depends on that always-dirty target. Avoid touching
+byte-identical version output and rely on the target's existing ALL membership
+to run it before installation instead of propagating its dirty state into the
+full WebAssembly extension and rerunning wasm-opt.
+---
+ tools/generate_torch_version.py | 34 +++++++++++++++++++---------------
+ torch/CMakeLists.txt            |  1 -
+ 2 files changed, 19 insertions(+), 16 deletions(-)
+
+diff --git a/tools/generate_torch_version.py b/tools/generate_torch_version.py
+--- a/tools/generate_torch_version.py
++++ b/tools/generate_torch_version.py
+@@ -146,18 +146,22 @@ if __name__ == "__main__":
+     else:
+         version = tagged_version
+ 
+-    with open(version_path, "w") as f:
+-        f.write("from typing import Optional\n\n")
+-        f.write(
+-            "__all__ = ['__version__', 'debug', 'cuda', 'git_version', 'hip', 'rocm', 'xpu']\n"
+-        )
+-        f.write(f"__version__ = '{version}'\n")
+-        # NB: This is not 100% accurate, because you could have built the
+-        # library code with DEBUG, but csrc without DEBUG (in which case
+-        # this would claim to be a release build when it's not.)
+-        f.write(f"debug = {repr(bool(args.is_debug))}\n")
+-        f.write(f"cuda: Optional[str] = {repr(args.cuda_version)}\n")
+-        f.write(f"git_version = {repr(sha)}\n")
+-        f.write(f"hip: Optional[str] = {repr(args.hip_version)}\n")
+-        f.write(f"rocm: Optional[str] = {repr(args.rocm_version)}\n")
+-        f.write(f"xpu: Optional[str] = {repr(args.xpu_version)}\n")
++    # NB: The debug value is not 100% accurate, because you could have built
++    # the library code with DEBUG, but csrc without DEBUG.
++    version_contents = "\n".join(
++        (
++            "from typing import Optional",
++            "",
++            "__all__ = ['__version__', 'debug', 'cuda', 'git_version', 'hip', 'rocm', 'xpu']",
++            f"__version__ = '{version}'",
++            f"debug = {repr(bool(args.is_debug))}",
++            f"cuda: Optional[str] = {repr(args.cuda_version)}",
++            f"git_version = {repr(sha)}",
++            f"hip: Optional[str] = {repr(args.hip_version)}",
++            f"rocm: Optional[str] = {repr(args.rocm_version)}",
++            f"xpu: Optional[str] = {repr(args.xpu_version)}",
++            "",
++        )
++    )
++    if not version_path.is_file() or version_path.read_text() != version_contents:
++        version_path.write_text(version_contents)
+
+diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
+--- a/torch/CMakeLists.txt
++++ b/torch/CMakeLists.txt
+@@ -539,7 +539,6 @@ add_custom_target(
+   COMMENT "Regenerating version file..."
+   WORKING_DIRECTORY ${TORCH_ROOT}
+ )
+-add_dependencies(torch_python gen_torch_version)
+ # version.py is gitignored (generated), so scikit-build-core won't include it
+ # via Python package collection. Install it explicitly via cmake instead.
+ install(FILES "${TORCH_SRC_DIR}/version.py" DESTINATION ".")
+-- 
+2.50.1

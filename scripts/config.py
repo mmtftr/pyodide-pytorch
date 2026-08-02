@@ -39,10 +39,19 @@ ENV_KEYS = {
     "RELEASE_TAG": ("release", "tag"),
     "MAX_JOBS": ("build", "max_jobs"),
     "MAXIMUM_WHEEL_MIB": ("build", "maximum_wheel_mib"),
-    "WHEEL_VERSION": ("host_tools", "wheel_version"),
-    "NINJA_VERSION": ("host_tools", "ninja_version"),
     "CMAKE_VERSION": ("host_tools", "cmake_version"),
+    "NINJA_VERSION": ("host_tools", "ninja_version"),
     "NUMPY_VERSION": ("host_tools", "numpy_version"),
+    "PACKAGING_VERSION": ("host_tools", "packaging_version"),
+    "PYYAML_VERSION": ("host_tools", "pyyaml_version"),
+    "REQUESTS_VERSION": ("host_tools", "requests_version"),
+    "SETUPTOOLS_VERSION": ("host_tools", "setuptools_version"),
+    "SIX_VERSION": ("host_tools", "six_version"),
+    "TYPING_EXTENSIONS_VERSION": (
+        "host_tools",
+        "typing_extensions_version",
+    ),
+    "WHEEL_VERSION": ("host_tools", "wheel_version"),
     "AUDITWHEEL_EMSCRIPTEN_VERSION": (
         "host_tools",
         "auditwheel_emscripten_version",
@@ -91,10 +100,24 @@ def validate(config: dict[str, Any]) -> list[str]:
         release_tag = str(lookup(config, ("release", "tag")))
         max_jobs = int(lookup(config, ("build", "max_jobs")))
         max_wheel = int(lookup(config, ("build", "maximum_wheel_mib")))
-        wheel_version = str(lookup(config, ("host_tools", "wheel_version")))
-        ninja_version = str(lookup(config, ("host_tools", "ninja_version")))
         cmake_version = str(lookup(config, ("host_tools", "cmake_version")))
+        ninja_version = str(lookup(config, ("host_tools", "ninja_version")))
         numpy_version = str(lookup(config, ("host_tools", "numpy_version")))
+        packaging_version = str(
+            lookup(config, ("host_tools", "packaging_version"))
+        )
+        pyyaml_version = str(lookup(config, ("host_tools", "pyyaml_version")))
+        requests_version = str(
+            lookup(config, ("host_tools", "requests_version"))
+        )
+        setuptools_version = str(
+            lookup(config, ("host_tools", "setuptools_version"))
+        )
+        six_version = str(lookup(config, ("host_tools", "six_version")))
+        typing_extensions_version = str(
+            lookup(config, ("host_tools", "typing_extensions_version"))
+        )
+        wheel_version = str(lookup(config, ("host_tools", "wheel_version")))
         auditwheel_emscripten_version = str(
             lookup(config, ("host_tools", "auditwheel_emscripten_version"))
         )
@@ -148,34 +171,56 @@ def validate(config: dict[str, Any]) -> list[str]:
     if not re.fullmatch(r"[0-9a-f]{64}", lapack_sha256):
         errors.append("lapack.sha256 must be a lowercase SHA-256 digest")
     release_match = re.fullmatch(
-        r"torch-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*-pyodide-"
-        r"(?P<pyodide>\d+\.\d+\.\d+)(?:-r[1-9]\d*)?",
+        r"torch-(?P<torch>\d+\.\d+\.\d+)-pyodide-"
+        r"(?P<pyodide>\d+\.\d+\.\d+)-r(?P<revision>[1-9]\d*)",
         release_tag,
     )
     if release_match is None:
-        errors.append("release.tag must match torch-*-pyodide-X.Y.Z[-rN]")
+        errors.append("release.tag must match torch-X.Y.Z-pyodide-X.Y.Z-rN")
     elif release_match.group("pyodide") != pyodide_version:
         errors.append("release.tag must contain the pinned Pyodide version")
+    else:
+        expected_version = (
+            f"{release_match.group('torch')}+pyodide{pyodide_version}."
+            f"r{release_match.group('revision')}"
+        )
+        if version != expected_version:
+            errors.append(
+                "pytorch.version must encode the same torch, Pyodide, and "
+                "release revision as release.tag"
+            )
     if not 1 <= max_jobs <= 16:
         errors.append("build.max_jobs must be between 1 and 16")
     if not 20 <= max_wheel <= 500:
         errors.append("build.maximum_wheel_mib must be between 20 and 500")
     for name, value in (
-        ("host_tools.wheel_version", wheel_version),
-        ("host_tools.ninja_version", ninja_version),
         ("host_tools.cmake_version", cmake_version),
+        ("host_tools.ninja_version", ninja_version),
         ("host_tools.numpy_version", numpy_version),
+        ("host_tools.packaging_version", packaging_version),
+        ("host_tools.pyyaml_version", pyyaml_version),
+        ("host_tools.requests_version", requests_version),
+        ("host_tools.setuptools_version", setuptools_version),
+        ("host_tools.six_version", six_version),
+        ("host_tools.typing_extensions_version", typing_extensions_version),
+        ("host_tools.wheel_version", wheel_version),
         (
             "host_tools.auditwheel_emscripten_version",
             auditwheel_emscripten_version,
         ),
     ):
-        if not re.fullmatch(r"\d+\.\d+\.\d+(?:\.\d+)?", value):
+        if not re.fullmatch(r"\d+(?:\.\d+){1,3}", value):
             errors.append(f"{name} must be an exact numeric version")
     expected_constraints = [
         f"cmake=={cmake_version}",
         f"ninja=={ninja_version}",
         f"numpy=={numpy_version}",
+        f"packaging=={packaging_version}",
+        f"pyyaml=={pyyaml_version}",
+        f"requests=={requests_version}",
+        f"setuptools=={setuptools_version}",
+        f"six=={six_version}",
+        f"typing-extensions=={typing_extensions_version}",
         f"wheel=={wheel_version}",
     ]
     try:

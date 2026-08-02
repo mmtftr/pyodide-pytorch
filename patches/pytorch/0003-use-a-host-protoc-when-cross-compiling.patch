@@ -6,16 +6,18 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-Require a native protoc from PyTorch’s pinned protobuf submodule so the WebAssembly build never executes a target binary.
+Require a native protoc from PyTorch’s pinned protobuf submodule and disable
+the target-side executable so the WebAssembly build never links or executes a
+target protoc.
 ---
- CMakeLists.txt | 10 ++++++++++
- 1 file changed, 10 insertions(+)
+ CMakeLists.txt | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index 13776f1e..33f830e9 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -708,6 +708,16 @@ endif()
+@@ -708,6 +708,18 @@ endif()
  
  if(EMSCRIPTEN)
    add_compile_definitions(PYTORCH_WASM_NO_THREADS=1)
@@ -29,6 +31,8 @@ index 13776f1e..33f830e9 100644
 +      CACHE FILEPATH "Host protoc for WebAssembly cross-compilation" FORCE)
 +  set(CAFFE2_CUSTOM_PROTOC_EXECUTABLE "$ENV{PYTORCH_HOST_PROTOC}"
 +      CACHE FILEPATH "Host protoc for WebAssembly cross-compilation" FORCE)
++  set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL
++      "Do not link a target protoc during cross-compilation" FORCE)
  endif()
  
  # Set INTERN_BUILD_MOBILE for all mobile builds. Components that are not

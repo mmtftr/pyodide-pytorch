@@ -36,34 +36,39 @@ for shared WebAssembly memory.
 
 ## Experimental WebGPU backend
 
-The `r4` release and development wheels built from `main` include an
+The `r5` release and development wheels built from `main` include an
 experimental `PrivateUse1` backend named `webgpu`. It submits real WGSL
 compute work through the browser WebGPU API, but it is not a general PyTorch
 accelerator backend.
 
-Release `r4` is limited to one device, `torch.float32`, CPU-to-GPU and
-GPU-to-GPU copies, addition, multiplication, broadcasting, metadata-only
-views, and explicit asynchronous readback. The current development wheel also
-browser-verifies ReLU, 2-D matrix multiplication, and contiguous last-dimension
-softmax through the pinned torch-webgpu WGSL implementations. Other imported
-entry points remain compile-only until individually exercised. Consult the
-[operator support table](docs/webgpu-operator-support.md). Unsupported
+Release `r5` supports one device and adds `torch.float32` model tensors,
+int32 token IDs (or signed-int32-valued IDs in real int64 storage), CPU-to-GPU
+and GPU-to-GPU copies, elementwise operations,
+broadcasting, metadata-only views, matrix operations, and explicit
+asynchronous readback. It includes embedding, general
+strided materialization and concatenation, batched matrix multiplication and
+fused linear-with-bias layers, LayerNorm, RMSNorm, and fused causal attention
+with grouped query heads. Its browser gate executes a small full-sequence GPT
+decoder block and composed rotary encoding. Consult the
+[operator support table](docs/webgpu-operator-support.md). This is an
+inference kernel profile, not general LLM compatibility: general KV-cache mutation,
+sampling, arbitrary quantization, float16/bfloat16, model loading, tokenizer
+code, and repository-specific custom operators remain unsupported. The narrow
+exceptions are the opt-in Qwen2/Llama/Mistral preallocated cache adapter and
+the explicit single-row group-128 Q8 linear prototype; neither is a general
+Transformers cache or quantization implementation. Unsupported
 operators raise errors; there is no implicit CPU fallback.
 
-The current development wheel adds int32 token IDs, embedding, general
-strided materialization and concatenation, batched matrix multiplication and
-linear layers, LayerNorm, RMSNorm, and fused causal attention with grouped
-query heads. Its browser gate executes a small full-sequence GPT decoder block
-and composed rotary encoding. This is an inference kernel profile, not general
-LLM compatibility: KV-cache mutation, sampling, quantization, float16/bfloat16,
-model loading, tokenizer code, and repository-specific custom operators remain
-unsupported.
-
-Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. Stock
-single-threaded Pyodide cannot turn that Promise into a synchronous PyTorch
-copy, so `.cpu()`, `.item()`, and operations that need to inspect values on the
-host do not work for WebGPU tensors. Use
-`await torch.webgpu.to_cpu_async(tensor)`.
+Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. The portable API
+is therefore still `await torch.webgpu.to_cpu_async(tensor)`. When Pyodide's
+JSPI stack switching is active, `torch.webgpu.to_cpu_sync(tensor)`, `.cpu()`,
+and `.item()` bridge to that coroutine. Python must be entered through
+`runPythonAsync()` or a PyProxy `callPromising()` call, and
+`pyodide.ffi.can_run_sync()` must return true. `runPython()`, direct synchronous
+PyProxy calls, and runtimes without JSPI fail with a directed error that names
+the async fallback. Chrome 137+ ships JSPI without a flag; Node 24 requires
+`--experimental-wasm-jspi`. Feature-detect the capability rather than relying
+on a version check.
 
 The WebGPU backend:
 

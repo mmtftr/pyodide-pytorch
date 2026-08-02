@@ -1,12 +1,15 @@
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const SHELL_CACHE = `${CACHE_PREFIX}shell-v5`;
-const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v3`;
+const SHELL_CACHE = `${CACHE_PREFIX}shell-v11`;
+const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v7`;
 const SHELL_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
-  "./app.js?v=5",
-  "./worker.js?v=5",
+  "./app.js?v=11",
+  "./worker.js?v=11",
+  "./transformers_browser_bootstrap.py",
+  "./transformers_gemma2_webgpu.py",
+  "./transformers_q8.py",
 ];
 
 async function put(cacheName, request, response) {
@@ -65,6 +68,9 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   const isManifest = url.pathname.endsWith("/runtime/build-manifest.json");
+  const isTransformersManifest = url.pathname.endsWith(
+    "/runtime/transformers/transformers-browser-manifest.json",
+  );
   const isWheel = url.pathname.includes("/runtime/") && url.pathname.endsWith(".whl");
   const isPyodideAsset = url.hostname === "cdn.jsdelivr.net" && url.pathname.includes("/pyodide/");
   const isPythonPackage =
@@ -72,7 +78,11 @@ self.addEventListener("fetch", (event) => {
     url.hostname === "pypi.org" ||
     url.pathname.endsWith(".whl");
 
-  if (request.mode === "navigate" || isManifest) {
+  if (isManifest || isTransformersManifest) {
+    // A cached manifest can pair a new shell with old runtime assets.
+    // Release and companion selection are fail-closed and network-only.
+    event.respondWith(fetch(request));
+  } else if (request.mode === "navigate") {
     event.respondWith(networkFirst(request, SHELL_CACHE));
   } else if (isWheel || isPyodideAsset || isPythonPackage) {
     event.respondWith(cacheFirst(request, RUNTIME_CACHE));

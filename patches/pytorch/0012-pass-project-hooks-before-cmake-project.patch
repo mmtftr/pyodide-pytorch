@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000012 Mon Sep 17 00:00:00 2001
+From: pytorch-pyodide maintainers <noreply@github.com>
+Date: Sat, 1 Aug 2026 17:30:00 +0200
+Subject: [PATCH 12/12] Pass CMake project hooks before language setup
+
+PyTorch's in-CMake environment forwarding runs after the top-level project()
+command. Project hooks supplied only through that module therefore arrive too
+late to affect the initial toolchain and language setup. Forward the two CMake
+project hooks on the configure command line so they are active from the first
+project() call.
+---
+ tools/setup_helpers/cmake.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/tools/setup_helpers/cmake.py b/tools/setup_helpers/cmake.py
+--- a/tools/setup_helpers/cmake.py
++++ b/tools/setup_helpers/cmake.py
+@@ -287,6 +287,16 @@ class CMake:
+             "BUILD_TEST": build_test,
+         }
+ 
++        # EnvVarForwarding.cmake runs after the top-level project() command,
++        # but these hooks must be defined before that command starts toolchain
++        # and language initialization. Keep other CMAKE_* forwarding in CMake.
++        for project_hook in (
++            "CMAKE_PROJECT_INCLUDE_BEFORE",
++            "CMAKE_PROJECT_INCLUDE",
++        ):
++            if project_hook_value := my_env.get(project_hook):
++                build_options[project_hook] = project_hook_value
++
+         # FindPython cannot infer target headers from the host interpreter
+         # while cross-compiling. Pyodide supplies the target include directory
+         # explicitly so CMake keeps BUILD_PYTHON enabled and creates torch._C.
+-- 
+2.50.1

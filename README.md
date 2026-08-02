@@ -9,8 +9,9 @@
 Run PyTorch in a browser or another Pyodide environment. This repository
 produces a reproducible WebAssembly wheel, tests it inside the exact Pyodide
 runtime it targets, and publishes the wheel with checksums and build
-provenance. The main branch also contains an early browser WebGPU backend;
-the `r4` release makes that backend available in the playground.
+provenance. The `r5` build contains an early browser WebGPU backend and a
+release pipeline that promotes its exact browser-tested artifact to the
+playground.
 
 **[Try the browser playground](https://mmtftr.github.io/pyodide-pytorch/)**
 · [Download the latest release](https://github.com/mmtftr/pyodide-pytorch/releases/latest)
@@ -24,11 +25,11 @@ the `r4` release makes that backend available in the playground.
 
 | Component | Version |
 | --- | --- |
-| PyTorch | `2.13.0+pyodide314.0.2.r4` |
+| PyTorch | `2.13.0+pyodide314.0.2.r5` |
 | Pyodide | `314.0.2` |
 | Python | `3.14.2` (`cp314`) |
 | WebAssembly platform | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r4` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r5` |
 
 The complete, ABI-relevant configuration lives in
 [`config/build.toml`](config/build.toml). A wheel is compatible only with the
@@ -37,10 +38,10 @@ CPython wheel.
 
 ## Try it
 
-The [playground](https://mmtftr.github.io/pyodide-pytorch/) loads the latest
-fully validated `main` wheel in a Web Worker, falling back to the latest
-verified release when no matching build artifact is being deployed. It
-provides:
+The [playground](https://mmtftr.github.io/pyodide-pytorch/) loads the exact
+release artifact promoted from a successful `main` build in a Web Worker. It
+fails closed if the deployed manifest or wheel digest cannot be verified; it
+never silently substitutes an older release. It provides:
 
 - a CodeMirror Python editor and separate output console;
 - autocompletion with `Tab` or `Ctrl+Space`;
@@ -109,7 +110,7 @@ on a CORS-enabled origin, and verify its published SHA-256 digest.
 
 ## Experimental WebGPU backend
 
-The `r4` release and development wheels built from `main` expose a real
+The `r5` release and development wheels built from `main` expose a real
 PyTorch `webgpu` device in browsers that implement WebGPU:
 
 ```python
@@ -127,28 +128,38 @@ print(await torch.webgpu.to_cpu_async(result))
 
 The backend is intentionally bounded:
 
-- one browser `GPUDevice`, float32 model tensors, int32 token indices, and at
-  most eight dimensions;
+- one browser `GPUDevice`, float32 model tensors, int32 token indices or
+  signed-int32-valued indices in real 8-byte `torch.int64` storage, byte-packed
+  Bool for the bounded mask-control path, and at most eight dimensions;
 - GPU-native tensor addition and multiplication, including broadcasting,
   storage offsets, and `alpha` for addition;
 - metadata-only `view`, slice, and transpose operations;
 - CPU-to-GPU and GPU-to-GPU copies;
 - explicit asynchronous GPU-to-CPU readback through
-  `await torch.webgpu.to_cpu_async(tensor)`;
+  `await torch.webgpu.to_cpu_async(tensor)`, plus JSPI-gated
+  `to_cpu_sync`, `.cpu()`, and `.item()` compatibility wrappers;
 - unsupported operations fail instead of silently falling back to the CPU.
 
-Development wheels also include a browser-verified decoder inference slice:
+The browser-verified decoder inference slice includes:
 embedding, strided materialization/concatenation, BMM/linear, LayerNorm,
 RMSNorm, fused causal/GQA attention, and a complete tiny GPT block assembled
-with the existing activation and elementwise WGSL kernels. The separately
+with the existing activation and elementwise WGSL kernels. LayerNorm returns
+the native output/mean/rstd tuple and uses a stable Welford reduction for
+affine, multi-dimensional normalized suffixes. Linear projection and bias
+addition share one tiled dispatch. An opt-in preallocated Qwen2/Llama/Mistral
+cache writes paired K/V states in one indexed dispatch, and an explicit
+decode-only Q8 linear path stores group-128 weights in 1.03125 bytes/value.
+The separately
 maintained kernels are under `webgpu/llm_kernels`, not the pinned vendor trees.
-This does not yet include KV-cache mutation, sampling, quantization, or reduced
-precision.
+This does not yet include general cache implementations, sampling, arbitrary
+quantization formats, or reduced-precision activations.
 
-Synchronous `.cpu()`, `.item()`, and value-based tensor formatting cannot wait
-for WebGPU buffer mapping in stock single-threaded Pyodide, so they are not
-implemented. This is a `PrivateUse1` backend named `webgpu`; it does not claim
-CUDA compatibility and `torch.cuda.is_available()` remains false.
+The synchronous wrappers require `pyodide.ffi.can_run_sync()` and an async
+Python entrypoint: `runPythonAsync()` or PyProxy `callPromising()`. Code entered
+through `runPython()`, a direct synchronous PyProxy call, or a runtime without
+JSPI must use `to_cpu_async`. This is a `PrivateUse1` backend named `webgpu`;
+it does not claim CUDA compatibility and `torch.cuda.is_available()` remains
+false.
 
 The development backend compiles against the exact Dawn-style headers shipped
 with Emdawnwebgpu and reuses pinned torch-webgpu C++ dispatch helpers and WGSL.
@@ -167,7 +178,7 @@ absent from stock Pyodide. See the
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| Experimental WebGPU (`r4`; broader on development) | `float32` eager inference subset with explicit async readback; see the operator table |
+| Experimental WebGPU (`r5`) | `float32` eager inference subset with explicit async readback; see the operator table |
 | CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |
@@ -193,7 +204,10 @@ series. CI then:
    tiny decoder block in Chromium with SwiftShader WebGPU, requiring zero
    validation errors or implicit CPU fallbacks;
 5. publishes a SHA-256 digest, a machine-readable build manifest, and a GitHub
-   artifact attestation.
+   artifact attestation;
+6. automatically promotes only that successful build to an immutable release,
+   then browser-smokes and deploys Pages from the Publisher run's exact
+   artifact.
 
 The selected suite is deliberately auditable. All 16 generated-test exclusions
 and every probed test not admitted to CI are documented in
@@ -209,6 +223,7 @@ and every probed test not admitted to CI are documented in
 | [Build and release](docs/building.md) | Build pipeline, validation, caching, and version updates |
 | [Browser WebGPU architecture](docs/webgpu-browser-architecture.md) | Side-module Emdawn profile, initialization, handles, lifetimes, and memory |
 | [Browser WebGPU operator support](docs/webgpu-operator-support.md) | Verified, compile-only, missing-kernel, fallback, and synchronous-readback status |
+| [Transformers/Qwen target](docs/transformers-qwen.md) | Blockers and hermetic acceptance plan for a real tiny Qwen2 model |
 | [Contributing](CONTRIBUTING.md) | Development workflow and pull-request expectations |
 | [Security policy](SECURITY.md) | Vulnerability reporting and release verification |
 
@@ -219,6 +234,8 @@ and every probed test not admitted to CI are documented in
   and `torch.nn`.
 - Expand the experimental WebGPU operator and dtype coverage while preserving
   explicit unsupported-operation errors and zero implicit CPU fallback.
+- Pass a hermetic tiny Qwen2 Transformers forward test before pursuing
+  cache-backed generation or public-size checkpoints.
 
 ## License
 

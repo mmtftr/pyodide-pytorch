@@ -8,25 +8,9 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const ASSET_VERSION = "5";
+const ASSET_VERSION = "11";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
-
-const FALLBACK_RELEASE = Object.freeze({
-  releaseTag: "torch-2.13.0-pyodide-314.0.2-r4",
-  releaseUrl:
-    "https://github.com/mmtftr/pyodide-pytorch/releases/tag/torch-2.13.0-pyodide-314.0.2-r4",
-  wheelUrl: new URL(
-    "torch-2.13.0+pyodide314.0.2.r4-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
-    RUNTIME_BASE_URL,
-  ).href,
-  wheelName:
-    "torch-2.13.0+pyodide314.0.2.r4-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
-  wheelSize: 27_205_688,
-  wheelSha256: "f40cea64246a09d63d0ca10e5257bcb53ba1c9de442f674464b7289f01b292fa",
-  pyodideVersion: "314.0.2",
-  torchVersion: "2.13.0+pyodide314.0.2.r4",
-});
 
 const EXAMPLES = Object.freeze({
   autograd: {
@@ -88,6 +72,99 @@ print(matrix)
 print("eigenvalues:", eigenvalues.tolist())
 print("inverse check:")
 print((matrix @ inverse).round(decimals=5))
+`,
+  },
+  transformersTiny: {
+    filename: "transformers_tiny.py",
+    code: `import importlib.util
+import json
+
+import torch
+import transformers
+from transformers_browser_bootstrap import (
+    enable_webgpu_opt_sdpa_mask_compatibility,
+    enable_webgpu_preallocated_kv_cache,
+    enable_webgpu_rms_norm_fusion,
+    enable_webgpu_rotary_scaling_compatibility,
+    enable_webgpu_swiglu_fusion,
+)
+
+if not torch.webgpu.is_available():
+    raise RuntimeError("WebGPU is not available in this browser")
+await torch.webgpu.init()
+
+assert importlib.util.find_spec("tokenizers") is None
+rms_norm_fusion = enable_webgpu_rms_norm_fusion()
+rotary_scaling = enable_webgpu_rotary_scaling_compatibility()
+swiglu_fusion = enable_webgpu_swiglu_fusion()
+opt_sdpa_mask = enable_webgpu_opt_sdpa_mask_compatibility()
+preallocated_kv = enable_webgpu_preallocated_kv_cache()
+with open("transformers_tiny.json", encoding="utf-8") as fixture_file:
+    fixture = json.load(fixture_file)
+
+spec = next(model for model in fixture["models"] if model["name"] == "qwen2")
+config = getattr(transformers, spec["config_class"])(**spec["kwargs"])
+config._attn_implementation = "sdpa"
+torch.manual_seed(fixture["seed"])
+model = getattr(transformers, spec["model_class"])(config).eval()
+cpu_inputs = {
+    "input_ids": torch.tensor(fixture["input_ids"], dtype=torch.long),
+    "position_ids": torch.tensor(fixture["position_ids"], dtype=torch.long),
+    "cache_position": torch.tensor(
+        fixture["cache_position"], dtype=torch.long
+    ),
+    "use_cache": False,
+    "return_dict": True,
+}
+with torch.no_grad():
+    expected_logits = model(**cpu_inputs).logits.detach().clone()
+
+model.to("webgpu")
+gpu_inputs = {
+    key: value.to("webgpu") if isinstance(value, torch.Tensor) else value
+    for key, value in cpu_inputs.items()
+}
+before = torch.webgpu.diagnostics()
+with torch.no_grad(), torch.webgpu.batch():
+    gpu_logits = model(**gpu_inputs).logits
+actual_logits = await torch.webgpu.to_cpu_async(gpu_logits)
+after = torch.webgpu.diagnostics()
+torch.testing.assert_close(actual_logits, expected_logits, rtol=2e-3, atol=2e-4)
+dispatches = int(after["dispatches"] - before["dispatches"])
+fallbacks = int(after["cpu_fallbacks"] - before["cpu_fallbacks"])
+assert dispatches > 0 and fallbacks == 0
+
+print("transformers:", transformers.__version__)
+print("tokenizers: unavailable (pre-tokenized model-only profile)")
+print("model:", type(model).__name__)
+print("parameters:", sum(parameter.numel() for parameter in model.parameters()))
+print("WebGPU forward: passed")
+print("dispatches:", dispatches, "· CPU fallbacks:", fallbacks)
+print(
+    "WebGPU RMSNorm adapter:",
+    rms_norm_fusion["profile"],
+    f'({len(rms_norm_fusion["targets"])} pinned classes)',
+)
+print(
+    "WebGPU rotary adapter:",
+    rotary_scaling["profile"],
+    f'({len(rotary_scaling["targets"])} pinned classes)',
+)
+print(
+    "WebGPU decode SwiGLU adapter:",
+    swiglu_fusion["profile"],
+    f'({len(swiglu_fusion["targets"])} pinned classes)',
+)
+print(
+    "WebGPU OPT SDPA-mask adapter:",
+    opt_sdpa_mask["profile"],
+    f'({len(opt_sdpa_mask["targets"])} pinned class)',
+)
+print(
+    "WebGPU preallocated KV cache:",
+    preallocated_kv["profile"],
+    f'({preallocated_kv["dispatches_saved_per_layer_per_token"]} dispatches saved/layer/token)',
+)
 `,
   },
   transformerBenchmark: {
@@ -177,13 +254,18 @@ with torch.no_grad():
     diagnostics_before = torch.webgpu.diagnostics()
     fallbacks_before = torch.webgpu.cpu_fallbacks()
 
+    def gpu_decoder_forward():
+        # Submit once per model forward instead of once per eager kernel.
+        with torch.webgpu.batch():
+            return decoder(gpu_token_ids, gpu_position_ids, gpu_parameters)
+
     # Warm-up compiles and caches pipelines. It is excluded from timed work.
-    gpu_logits = decoder(gpu_token_ids, gpu_position_ids, gpu_parameters)
+    gpu_logits = gpu_decoder_forward()
     await torch.webgpu.synchronize()
 
     started = time.perf_counter()
     for _ in range(GPU_REPEATS):
-        gpu_logits = decoder(gpu_token_ids, gpu_position_ids, gpu_parameters)
+        gpu_logits = gpu_decoder_forward()
     await torch.webgpu.synchronize()
     gpu_ms = (time.perf_counter() - started) * 1_000 / GPU_REPEATS
 
@@ -213,7 +295,11 @@ print(f"WebGPU: {gpu_ms:.2f} ms/forward · {BATCH * TOKENS * 1_000 / gpu_ms:.1f}
 print(f"CPU:    {cpu_ms:.2f} ms/forward")
 print(f"GPU/CPU time ratio: {gpu_ms / cpu_ms:.2f}x")
 print(f"final asynchronous readback: {readback_ms:.2f} ms")
-print(f"dispatches: {dispatches} · submissions: {submissions} · new CPU fallbacks: 0")
+print(
+    f"dispatches: {dispatches} total · "
+    f"{dispatches / (GPU_REPEATS + 1):.0f}/forward · "
+    f"submissions: {submissions} · new CPU fallbacks: 0"
+)
 print("Note: software WebGPU adapters are regression tools, not hardware benchmarks.")
 `,
   },
@@ -624,7 +710,12 @@ function validateReleaseManifest(manifest) {
   if (!configuration.pyodide?.version || !configuration.pytorch?.version) {
     throw new Error("The release manifest is missing runtime version pins.");
   }
-  if (!wheel.filename?.endsWith(".whl") || !wheel.sha256 || !wheel.size) {
+  if (
+    !wheel.filename?.endsWith(".whl") ||
+    !/^[0-9a-f]{64}$/.test(wheel.sha256) ||
+    !Number.isSafeInteger(wheel.size) ||
+    wheel.size <= 0
+  ) {
     throw new Error("The release manifest contains invalid wheel metadata.");
   }
   if (wheel.filename.includes("/") || wheel.filename.includes("\\")) {
@@ -640,10 +731,11 @@ async function resolveLatestRelease() {
   const manifest = await response.json();
   validateReleaseManifest(manifest);
   const releaseTag = manifest.configuration.release.tag;
+  const wheelUrl = new URL(manifest.wheel.filename, RUNTIME_BASE_URL);
   return {
     releaseTag,
     releaseUrl: `https://github.com/${REPOSITORY}/releases/tag/${encodeURIComponent(releaseTag)}`,
-    wheelUrl: new URL(manifest.wheel.filename, RUNTIME_BASE_URL).href,
+    wheelUrl: wheelUrl.href,
     wheelName: manifest.wheel.filename,
     wheelSize: manifest.wheel.size,
     wheelSha256: manifest.wheel.sha256,
@@ -690,13 +782,13 @@ function handleWorkerMessage(event) {
       setExecutionState("idle");
       setStatus(
         "Runtime ready",
-        `torch ${message.details.version} · ${message.details.platform} · one thread`,
+        `torch ${message.details.version} · Transformers ${message.details.transformers_version} · ${message.details.platform} · one thread`,
         "ready",
         "ready",
       );
       clearOutput();
       appendOutput(
-        `Python runtime ready\ntorch ${message.details.version}\nPyodide ${selectedRelease.pyodideVersion}\n`,
+        `Python runtime ready\ntorch ${message.details.version}\nTransformers ${message.details.transformers_version}\nHugging Face Hub ${message.details.huggingface_hub_version}\nWebGPU RMSNorm adapter ${message.details.webgpu_rms_norm_fusion.profile}\nWebGPU rotary adapter ${message.details.webgpu_rotary_scaling_compatibility.profile}\nWebGPU decode SwiGLU adapter ${message.details.webgpu_swiglu_fusion.profile}\nWebGPU OPT SDPA-mask adapter ${message.details.webgpu_opt_sdpa_mask_compatibility.profile}\nWebGPU preallocated KV cache ${message.details.webgpu_preallocated_kv_cache.profile}\nWebGPU Gemma2 RMSNorm ${message.details.webgpu_gemma2_rms_norm.profile}\nWebGPU Gemma2 scalar adapter ${message.details.webgpu_gemma2_scalar_normalizer.profile}\nWebGPU Q8 linear ${message.details.webgpu_q8_linear.profile} (${message.details.webgpu_q8_linear.enabled ? "available" : "requires fixed SIMD32 subgroups"})\nPyodide ${selectedRelease.pyodideVersion}\n`,
         "meta",
       );
       break;
@@ -779,9 +871,19 @@ async function bootstrap() {
   try {
     selectedRelease = await resolveLatestRelease();
   } catch (error) {
-    selectedRelease = { ...FALLBACK_RELEASE };
-    appendOutput(`Manifest lookup failed: ${error.message}\n`, "error");
-    appendOutput(`Using pinned release ${selectedRelease.releaseTag}.\n`, "meta");
+    selectedRelease = null;
+    runtimeReady = false;
+    running = false;
+    setControls();
+    setExecutionState("failed", "error");
+    setStatus(
+      "Release unavailable",
+      "The deployed wheel manifest could not be verified.",
+      "release",
+      "error",
+    );
+    appendOutput(`Release manifest error: ${error.message}\n`, "error");
+    return;
   }
   showRelease(selectedRelease);
   setControls();
