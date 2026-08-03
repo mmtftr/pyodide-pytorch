@@ -33,10 +33,10 @@ The canonical GitHub Actions build performs the following operations:
 4. Build a native `protoc` from PyTorch's pinned protobuf submodule so the
    cross-build never executes a WebAssembly target binary on the host.
 5. Install the pinned Emscripten and `pyodide-build` toolchains.
-6. Run `pyodide build --no-isolation --skip-emscripten-install
-   --exports=whole_archive` in the pinned host environment with the CPU-only
-   feature configuration. Avoiding a random PEP 517 environment path keeps the
-   CMake and compiler caches reusable.
+6. Run `pyodide build --skip-emscripten-install --exports=whole_archive` with
+   PEP 517 isolation enabled and the CPU-only feature configuration. Pyodide
+   overlays wasm32-specific build files into this environment, including the
+   generated NumPy ABI headers required by Torch's NumPy bridge.
 7. Remove headers, static archives, command-line programs, and other build-only
    payloads from the raw wheel.
 8. Run `pyodide auditwheel repair` to vendor the pinned Pyodide
@@ -171,13 +171,16 @@ build-tool, configuration, patch, and build-script inputs. Compiler-cache
 restore keys omit the workflow run identifier so a compatible previous build
 can be reused; the saved key remains unique per run attempt.
 
-The full PEP 517 dependency set is installed once from exact pins before the
-build. `scripts/build_wheel.sh` uses that environment directly and records the
-stable Ninja executable in `CMakeCache.txt`. This prevents the temporary
-`/tmp/build-env-*` paths created by isolated builds from invalidating the CMake
-graph. `ccache` uses compiler-content checks and a source-relative base
-directory; it also hashes Pyodide's generated `pywasmcross_env.json`, because
-that file supplies target flags which are not visible in the wrapper command.
+The full PEP 517 dependency set is constrained by exact pins. The build keeps
+PEP 517 isolation enabled because `pyodide-build` installs target-specific
+cross-build overlays there; using the ordinary host NumPy headers would encode
+the wrong integer and pointer widths in Torch's NumPy bridge. Before each build,
+`scripts/build_wheel.sh` rewrites a stale `CMAKE_MAKE_PROGRAM` entry to the
+stable pinned Ninja executable. This prevents the temporary `/tmp/build-env-*`
+paths from invalidating the CMake graph while retaining the ABI overlays.
+`ccache` uses compiler-content checks and a source-relative base directory; it
+also hashes Pyodide's generated `pywasmcross_env.json`, because that file
+supplies target flags which are not visible in the wrapper command.
 Regenerating an identical wrapper symlink therefore remains a hit, while an
 ABI or injected-flag change correctly misses. The build script also derives
 and exports `SOURCE_DATE_EPOCH` from the pinned PyTorch commit when the caller

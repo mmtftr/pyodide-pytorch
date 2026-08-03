@@ -480,7 +480,11 @@ class ToolTests(unittest.TestCase):
             / "0012-pass-project-hooks-before-cmake-project.patch"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("--no-isolation", build_script)
+        # Pyodide's isolated build environment overlays wasm32-specific NumPy
+        # headers. Bypassing it compiles torch against native x86-64 NumPy ABI
+        # metadata and corrupts torch <-> NumPy conversion at runtime.
+        self.assertNotIn("--no-isolation", build_script)
+        self.assertIn("wasm32-specific files", build_script)
         self.assertIn("CMAKE_MAKE_PROGRAM:FILEPATH=$stable_ninja", build_script)
         self.assertIn(
             'grep -Fqx "$expected_ninja_cache" "$cmake_cache"',

@@ -169,11 +169,11 @@ if command -v ccache >/dev/null 2>&1; then
   esac
 fi
 
-# Older isolated pyodide-build invocations recorded Ninja inside a random
-# /tmp/build-env-* directory. Repair that generated cache entry before
-# pyodide-build inspects it; otherwise it discards the entire CMake graph when
-# the temporary environment disappears. New builds use the stable, pinned
-# host environment below and naturally record the same Ninja path.
+# Isolated pyodide-build invocations create a fresh /tmp/build-env-* directory.
+# Repair the generated Ninja cache entry before pyodide-build inspects it so a
+# vanished environment does not invalidate the entire CMake graph. Isolation
+# must remain enabled: Pyodide overlays wasm32-specific files (notably NumPy's
+# generated ABI headers) into that environment before invoking PyTorch's build.
 cmake_cache="$source_dir/build/CMakeCache.txt"
 stable_ninja="$(command -v ninja)"
 if [[ -f "$cmake_cache" ]]; then
@@ -190,7 +190,6 @@ mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 cd "$source_dir"
 pyodide build \
-  --no-isolation \
   --skip-emscripten-install \
   --exports=whole_archive \
   --outdir "$output_dir"
