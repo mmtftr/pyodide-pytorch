@@ -285,24 +285,26 @@ jobs:
             exit 1
           fi
 
-          release_api_error="$(mktemp)"
+          # The REST "get release by tag" endpoint 404s for draft releases,
+          # so use `gh release view`, which resolves drafts correctly.
+          release_view_error="$(mktemp)"
           if release_json="$(
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-              2>"$release_api_error"
+            gh release view "$RELEASE_TAG" --json isDraft,assets \
+              2>"$release_view_error"
           )"; then
-            release_was_draft="$(jq -r '.draft' <<< "$release_json")"
-          elif grep -Fq "(HTTP 404)" "$release_api_error"; then
+            release_was_draft="$(jq -r '.isDraft' <<< "$release_json")"
+          elif grep -Fq "release not found" "$release_view_error"; then
             gh release create "$RELEASE_TAG" \
               --draft \
               --verify-tag \
               --generate-notes \
               --title "$RELEASE_TAG"
             release_json="$(
-              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+              gh release view "$RELEASE_TAG" --json isDraft,assets
             )"
             release_was_draft=true
           else
-            cat "$release_api_error" >&2
+            cat "$release_view_error" >&2
             echo "::error::Could not safely determine whether release $RELEASE_TAG exists"
             exit 1
           fi
@@ -322,7 +324,7 @@ jobs:
             fi
           done
 
-          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          release_json="$(gh release view "$RELEASE_TAG" --json assets)"
           mapfile -t expected_names < <(
             for asset in "${assets[@]}"; do basename "$asset"; done | sort
           )
