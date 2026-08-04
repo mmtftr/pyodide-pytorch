@@ -444,6 +444,121 @@ class SwiGluFusionTests(unittest.TestCase):
                     )
 
 
+class BertSdpaMaskCompatibilityTests(unittest.TestCase):
+    def make_modules(
+        self,
+        *,
+        transformers_version: str = "4.46.3",
+        omit_prepare: bool = False,
+        bad_prepare_signature: bool = False,
+        bad_expand_signature: bool = False,
+        include_operators: bool = True,
+    ) -> tuple[dict[str, ModuleType], list[tuple[object, ...]]]:
+        original_calls: list[tuple[object, ...]] = []
+        torch = ModuleType("torch")
+        if include_operators:
+            torch.ops = SimpleNamespace(  # type: ignore[attr-defined]
+                aten=SimpleNamespace(
+                    sub=SimpleNamespace(Scalar=lambda tensor, scalar: tensor),
+                    eq=SimpleNamespace(Scalar=lambda tensor, scalar: tensor),
+                )
+            )
+            torch.neg = lambda tensor: tensor  # type: ignore[attr-defined]
+            torch.finfo = lambda dtype: SimpleNamespace(min=-1.0)  # type: ignore[attr-defined]
+        transformers = ModuleType("transformers")
+        transformers.__version__ = transformers_version  # type: ignore[attr-defined]
+        utils = ModuleType(bootstrap._BERT_SDPA_MASK_UTILS_MODULE)
+        namespace: dict[str, object] = {
+            "__name__": bootstrap._BERT_SDPA_MASK_UTILS_MODULE,
+            "original_calls": original_calls,
+        }
+        prepare_parameters = (
+            "mask, dtype" if bad_prepare_signature else "mask, dtype, tgt_len=None"
+        )
+        expand_parameters = (
+            "mask, dtype" if bad_expand_signature else "mask, dtype, tgt_len=None"
+        )
+        exec(
+            "\n".join(
+                (
+                    f"def {bootstrap._BERT_SDPA_MASK_HELPER}({prepare_parameters}):",
+                    "    call = (mask, dtype, locals().get('tgt_len'))",
+                    "    original_calls.append(call)",
+                    "    return ('upstream', call)",
+                    f"def {bootstrap._BERT_EXPAND_MASK_HELPER}({expand_parameters}):",
+                    "    return ('expanded', mask)",
+                )
+            ),
+            namespace,
+        )
+        setattr(
+            utils,
+            bootstrap._BERT_SDPA_MASK_HELPER,
+            namespace[bootstrap._BERT_SDPA_MASK_HELPER],
+        )
+        setattr(
+            utils,
+            bootstrap._BERT_EXPAND_MASK_HELPER,
+            namespace[bootstrap._BERT_EXPAND_MASK_HELPER],
+        )
+        bert = ModuleType(bootstrap._BERT_SDPA_MASK_MODULE)
+        if not omit_prepare:
+            setattr(
+                bert,
+                bootstrap._BERT_SDPA_MASK_HELPER,
+                getattr(utils, bootstrap._BERT_SDPA_MASK_HELPER),
+            )
+        return {
+            "torch": torch,
+            "transformers": transformers,
+            bootstrap._BERT_SDPA_MASK_UTILS_MODULE: utils,
+            bootstrap._BERT_SDPA_MASK_MODULE: bert,
+        }, original_calls
+
+    def test_cpu_uses_upstream_and_enable_is_idempotent(self) -> None:
+        modules, original_calls = self.make_modules()
+        with mock.patch.dict(sys.modules, modules):
+            first = bootstrap.enable_webgpu_bert_sdpa_mask_compatibility()
+            prepare = getattr(
+                modules[bootstrap._BERT_SDPA_MASK_MODULE],
+                bootstrap._BERT_SDPA_MASK_HELPER,
+            )
+            cpu = FakeTensor("cpu", object(), (2, 4))
+            self.assertEqual(
+                prepare(cpu, "float32", 3),
+                ("upstream", (cpu, "float32", 3)),
+            )
+            second = bootstrap.enable_webgpu_bert_sdpa_mask_compatibility()
+        self.assertEqual(original_calls, [(cpu, "float32", 3)])
+        self.assertEqual(first["newly_patched"], 1)
+        self.assertEqual(second["already_patched"], 1)
+        self.assertIs(
+            getattr(
+                modules[bootstrap._BERT_SDPA_MASK_MODULE],
+                bootstrap._BERT_SDPA_MASK_HELPER,
+            ),
+            prepare,
+        )
+
+    def test_mismatches_fail_closed(self) -> None:
+        for modules in (
+            self.make_modules(transformers_version="4.47.0")[0],
+            self.make_modules(omit_prepare=True)[0],
+            self.make_modules(bad_prepare_signature=True)[0],
+            self.make_modules(bad_expand_signature=True)[0],
+            self.make_modules(include_operators=False)[0],
+        ):
+            bert = modules[bootstrap._BERT_SDPA_MASK_MODULE]
+            original = getattr(bert, bootstrap._BERT_SDPA_MASK_HELPER, None)
+            with mock.patch.dict(sys.modules, modules):
+                with self.assertRaises(bootstrap.TransformersBrowserProfileError):
+                    bootstrap.enable_webgpu_bert_sdpa_mask_compatibility()
+            self.assertIs(
+                getattr(bert, bootstrap._BERT_SDPA_MASK_HELPER, None),
+                original,
+            )
+
+
 class OptSdpaMaskCompatibilityTests(unittest.TestCase):
     def make_modules(
         self,

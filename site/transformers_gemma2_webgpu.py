@@ -29,6 +29,9 @@ _GEMMA2_NORMALIZER_MARKER = (
     "_pyodide_pytorch_webgpu_gemma2_scalar_normalizer_target"
 )
 _GEMMA2_NORMALIZER_CACHE = "_pyodide_pytorch_webgpu_gemma2_normalizer"
+_GEMMA2_CAUSAL_LM_CLASS = "Gemma2ForCausalLM"
+_GEMMA2_LOGIT_SOFTCAP_MARKER = "_pyodide_pytorch_webgpu_gemma2_logit_softcap_target"
+_GEMMA2_LOGIT_SOFTCAP_CACHE = "_pyodide_pytorch_webgpu_gemma2_logit_softcap"
 
 
 class Gemma2WebGPUProfileError(RuntimeError):
@@ -437,4 +440,139 @@ def enable_webgpu_gemma2_scalar_normalizer() -> dict[str, object]:
                 "status": "already_enabled" if already_enabled else "patched",
             }
         ],
+    }
+
+
+
+def _make_logit_softcap_forward(
+    original_forward: Callable[..., Any],
+    target_name: str,
+    torch: Any,
+) -> Callable[..., Any]:
+    signature = inspect.signature(original_forward)
+
+    @wraps(original_forward)
+    def webgpu_gemma2_logit_softcap_forward(
+        self: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        try:
+            arguments = signature.bind(self, *args, **kwargs)
+            arguments.apply_defaults()
+            labels = arguments.arguments["labels"]
+            weight = self.lm_head.weight
+            softcap = self.config.final_logit_softcapping
+            eligible = (
+                labels is None
+                and not self.training
+                and weight.device.type == "webgpu"
+                and weight.dtype == torch.float32
+                and isinstance(softcap, (int, float))
+                and math.isfinite(float(softcap))
+                and float(softcap) > 0.0
+            )
+            is_grad_enabled = getattr(torch, "is_grad_enabled", None)
+            if eligible and callable(is_grad_enabled) and is_grad_enabled():
+                eligible = not bool(getattr(weight, "requires_grad", False))
+        except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+            eligible = False
+        if not eligible:
+            return original_forward(self, *args, **kwargs)
+        expected_value = float(softcap)
+        cache = getattr(self, _GEMMA2_LOGIT_SOFTCAP_CACHE, None)
+        if not (
+            isinstance(cache, tuple)
+            and len(cache) == 2
+            and cache[0] == expected_value
+            and cache[1].device == weight.device
+            and cache[1].dtype == weight.dtype
+            and tuple(cache[1].shape) == ()
+        ):
+            cached_tensor = torch.full(
+                (), expected_value, dtype=weight.dtype, device=weight.device
+            )
+            object.__setattr__(
+                self,
+                _GEMMA2_LOGIT_SOFTCAP_CACHE,
+                (expected_value, cached_tensor),
+            )
+        else:
+            cached_tensor = cache[1]
+        original_softcap = self.config.final_logit_softcapping
+        self.config.final_logit_softcapping = cached_tensor
+        try:
+            return original_forward(self, *args, **kwargs)
+        finally:
+            self.config.final_logit_softcapping = original_softcap
+
+    setattr(webgpu_gemma2_logit_softcap_forward, _GEMMA2_LOGIT_SOFTCAP_MARKER, target_name)
+    return webgpu_gemma2_logit_softcap_forward
+
+
+def enable_webgpu_gemma2_logit_softcapping() -> dict[str, object]:
+    """Keep Gemma2 final-logit softcapping scalars on WebGPU."""
+    try:
+        import torch
+        import transformers
+    except ImportError as error:
+        raise Gemma2WebGPUProfileError(
+            "Gemma2 WebGPU logit softcapping requires torch and Transformers; no classes were changed"
+        ) from error
+    installed_version = getattr(transformers, "__version__", "<unknown>")
+    if installed_version != _SUPPORTED_TRANSFORMERS_VERSION:
+        raise Gemma2WebGPUProfileError(
+            "Gemma2 WebGPU logit softcapping supports exactly Transformers "
+            f"{_SUPPORTED_TRANSFORMERS_VERSION}; found {installed_version}. No classes were changed."
+        )
+    if not callable(getattr(torch, "full", None)):
+        raise Gemma2WebGPUProfileError(
+            "Gemma2 WebGPU logit softcapping requires torch.full; no classes were changed"
+        )
+    try:
+        modeling_module = importlib.import_module(_GEMMA2_MODULE)
+    except Exception as error:
+        raise Gemma2WebGPUProfileError(
+            f"Gemma2 WebGPU logit softcapping could not import {_GEMMA2_MODULE}: {error}. No classes were changed."
+        ) from error
+    target_class = getattr(modeling_module, _GEMMA2_CAUSAL_LM_CLASS, None)
+    target_name = f"{_GEMMA2_MODULE}.{_GEMMA2_CAUSAL_LM_CLASS}"
+    if not isinstance(target_class, type) or target_class.__module__ != _GEMMA2_MODULE or target_class.__name__ != _GEMMA2_CAUSAL_LM_CLASS:
+        raise Gemma2WebGPUProfileError(
+            f"Gemma2 WebGPU logit softcapping expected {target_name}; no classes were changed"
+        )
+    forward = getattr(target_class, "forward", None)
+    marker = getattr(forward, _GEMMA2_LOGIT_SOFTCAP_MARKER, None)
+    if marker is not None and marker != target_name:
+        raise Gemma2WebGPUProfileError(
+            f"Gemma2 WebGPU logit softcapping found an incompatible adapter on {target_name}; no classes were changed"
+        )
+    already = marker == target_name
+    expected_parameters = (
+        "self", "input_ids", "attention_mask", "position_ids",
+        "past_key_values", "inputs_embeds", "labels", "use_cache",
+        "output_attentions", "output_hidden_states", "return_dict",
+        "cache_position", "num_logits_to_keep", "loss_kwargs",
+    )
+    if not already and (
+        not inspect.isfunction(forward)
+        or forward.__module__ != _GEMMA2_MODULE
+        or forward.__qualname__ != f"{_GEMMA2_CAUSAL_LM_CLASS}.forward"
+        or tuple(inspect.signature(forward).parameters) != expected_parameters
+    ):
+        raise Gemma2WebGPUProfileError(
+            f"Gemma2 WebGPU logit softcapping found an unexpected forward on {target_name}; no classes were changed"
+        )
+    if not already:
+        target_class.forward = _make_logit_softcap_forward(  # type: ignore[method-assign]
+            forward, target_name, torch
+        )
+    return {
+        "enabled": True,
+        "profile": "transformers-4.46.3-webgpu-gemma2-logit-softcapping",
+        "transformers_version": installed_version,
+        "supported_transformers_version": _SUPPORTED_TRANSFORMERS_VERSION,
+        "newly_patched": 0 if already else 1,
+        "already_patched": 1 if already else 0,
+        "mixed_device_scalar_operations_avoided_per_forward": 2,
+        "device_scalar_allocations_per_model": "at-most-one-per-device-dtype-value",
+        "targets": [{"target": target_name, "status": "already_enabled" if already else "patched"}],
     }

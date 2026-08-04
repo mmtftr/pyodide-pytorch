@@ -94,10 +94,13 @@ gemma = {}
 exec(await gemma_response.text(), gemma)
 rms_adapter = gemma["enable_webgpu_gemma2_rms_norm"]()
 scalar_adapter = gemma["enable_webgpu_gemma2_scalar_normalizer"]()
+logit_softcap_adapter = gemma["enable_webgpu_gemma2_logit_softcapping"]()
 assert rms_adapter["newly_patched"] == 1
 assert scalar_adapter["newly_patched"] == 1
+assert logit_softcap_adapter["newly_patched"] == 1
 assert gemma["enable_webgpu_gemma2_rms_norm"]()["already_patched"] == 1
 assert gemma["enable_webgpu_gemma2_scalar_normalizer"]()["already_patched"] == 1
+assert gemma["enable_webgpu_gemma2_logit_softcapping"]()["already_patched"] == 1
 
 fixture_response = await js.fetch("/fixtures/transformers_tiny.json")
 if not fixture_response.ok:
@@ -172,6 +175,8 @@ assert readbacks == 1, readbacks
 assert fallbacks == 0, fallbacks
 assert gpu_recorder.counts.get("webgpu::gemma_rms_norm", 0) == 9
 assert gpu_recorder.counts.get("aten::mean.dim", 0) == 0
+assert gpu_recorder.counts.get("aten::div.Tensor", 0) >= 1
+assert gpu_recorder.counts.get("aten::mul.Tensor", 0) >= 1
 for name, expected_count in (
     ("aten::gt.Tensor", 1),
     ("aten::triu", 1),
@@ -208,6 +213,7 @@ json.dumps({
     "cpu_operator_counts": dict(sorted(cpu_recorder.counts.items())),
     "rms_norm_adapter": rms_adapter,
     "scalar_normalizer_adapter": scalar_adapter,
+    "logit_softcap_adapter": logit_softcap_adapter,
 })
 `);
     const diagnostics = JSON.parse(result);

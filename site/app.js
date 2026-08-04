@@ -82,6 +82,9 @@ import json
 import torch
 import transformers
 from transformers_browser_bootstrap import (
+    enable_webgpu_bert_sdpa_mask_compatibility,
+    enable_webgpu_gpt2_operator_compatibility,
+    enable_webgpu_opt_operator_compatibility,
     enable_webgpu_opt_sdpa_mask_compatibility,
     enable_webgpu_preallocated_kv_cache,
     enable_webgpu_rms_norm_fusion,
@@ -97,6 +100,9 @@ assert importlib.util.find_spec("tokenizers") is None
 rms_norm_fusion = enable_webgpu_rms_norm_fusion()
 rotary_scaling = enable_webgpu_rotary_scaling_compatibility()
 swiglu_fusion = enable_webgpu_swiglu_fusion()
+gpt2_operators = enable_webgpu_gpt2_operator_compatibility()
+opt_operators = enable_webgpu_opt_operator_compatibility()
+bert_sdpa_mask = enable_webgpu_bert_sdpa_mask_compatibility()
 opt_sdpa_mask = enable_webgpu_opt_sdpa_mask_compatibility()
 preallocated_kv = enable_webgpu_preallocated_kv_cache()
 with open("transformers_tiny.json", encoding="utf-8") as fixture_file:
@@ -154,6 +160,21 @@ print(
     "WebGPU decode SwiGLU adapter:",
     swiglu_fusion["profile"],
     f'({len(swiglu_fusion["targets"])} pinned classes)',
+)
+print(
+    "WebGPU GPT-2 operator adapter:",
+    gpt2_operators["profile"],
+    f'({len(gpt2_operators["targets"])} pinned classes)',
+)
+print(
+    "WebGPU OPT operator adapter:",
+    opt_operators["profile"],
+    f'({len(opt_operators["targets"])} pinned classes)',
+)
+print(
+    "WebGPU BERT SDPA-mask adapter:",
+    bert_sdpa_mask["profile"],
+    f'({len(bert_sdpa_mask["targets"])} pinned helper)',
 )
 print(
     "WebGPU OPT SDPA-mask adapter:",
@@ -788,7 +809,7 @@ function handleWorkerMessage(event) {
       );
       clearOutput();
       appendOutput(
-        `Python runtime ready\ntorch ${message.details.version}\nTransformers ${message.details.transformers_version}\nHugging Face Hub ${message.details.huggingface_hub_version}\nWebGPU RMSNorm adapter ${message.details.webgpu_rms_norm_fusion.profile}\nWebGPU rotary adapter ${message.details.webgpu_rotary_scaling_compatibility.profile}\nWebGPU decode SwiGLU adapter ${message.details.webgpu_swiglu_fusion.profile}\nWebGPU OPT SDPA-mask adapter ${message.details.webgpu_opt_sdpa_mask_compatibility.profile}\nWebGPU preallocated KV cache ${message.details.webgpu_preallocated_kv_cache.profile}\nWebGPU Gemma2 RMSNorm ${message.details.webgpu_gemma2_rms_norm.profile}\nWebGPU Gemma2 scalar adapter ${message.details.webgpu_gemma2_scalar_normalizer.profile}\nWebGPU Q8 linear ${message.details.webgpu_q8_linear.profile} (${message.details.webgpu_q8_linear.enabled ? "available" : "requires fixed SIMD32 subgroups"})\nPyodide ${selectedRelease.pyodideVersion}\n`,
+        `Python runtime ready\ntorch ${message.details.version}\nTransformers ${message.details.transformers_version}\nHugging Face Hub ${message.details.huggingface_hub_version}\nWebGPU RMSNorm adapter ${message.details.webgpu_rms_norm_fusion.profile}\nWebGPU rotary adapter ${message.details.webgpu_rotary_scaling_compatibility.profile}\nWebGPU decode SwiGLU adapter ${message.details.webgpu_swiglu_fusion.profile}\nWebGPU OPT SDPA-mask adapter ${message.details.webgpu_opt_sdpa_mask_compatibility.profile}\nWebGPU preallocated KV cache ${message.details.webgpu_preallocated_kv_cache.profile}\nWebGPU Gemma2 RMSNorm ${message.details.webgpu_gemma2_rms_norm.profile}\nWebGPU Gemma2 scalar adapter ${message.details.webgpu_gemma2_scalar_normalizer.profile}\nWebGPU Gemma2 logit softcapping ${message.details.webgpu_gemma2_logit_softcapping.profile}\nWebGPU Q8 linear ${message.details.webgpu_q8_linear.profile} (${message.details.webgpu_q8_linear.enabled ? "available" : "requires fixed SIMD32 subgroups"})\nPyodide ${selectedRelease.pyodideVersion}\n`,
         "meta",
       );
       break;

@@ -18,7 +18,8 @@ Its Qwen2 and Llama rotary classes also route numeric attention scaling through
 the scalar ATen overload on WebGPU and elide the common identity scale. CPU and
 unsupported calls still execute the captured upstream methods.
 OPT can opt into a shape-proven SDPA-mask branch that avoids synchronously
-reading an internally generated all-one WebGPU mask.
+reading an internally generated all-one WebGPU mask. BERT can opt into explicit
+4-D mask expansion on WebGPU, avoiding its data-dependent all-one truth check.
 
 The upstream wheel and its dependency metadata remain unchanged. This module
 does not create a fake ``tokenizers`` package, alter model state, or claim that
@@ -101,6 +102,23 @@ _OPT_SDPA_MASK_TARGET = (
     "transformers.models.opt.modeling_opt",
     "OPTDecoder",
 )
+_BERT_SDPA_MASK_MARKER = "_pyodide_pytorch_webgpu_bert_sdpa_mask_target"
+_BERT_SDPA_MASK_MODULE = "transformers.models.bert.modeling_bert"
+_BERT_SDPA_MASK_UTILS_MODULE = "transformers.modeling_attn_mask_utils"
+_BERT_SDPA_MASK_HELPER = "_prepare_4d_attention_mask_for_sdpa"
+_BERT_EXPAND_MASK_HELPER = "_prepare_4d_attention_mask"
+_GPT2_CONV1D_MARKER = "_pyodide_pytorch_webgpu_gpt2_conv1d_target"
+_GPT2_CONV1D_MODULE = "transformers.pytorch_utils"
+_GPT2_CONV1D_CLASS = "Conv1D"
+_GPT2_GELU_MARKER = "_pyodide_pytorch_webgpu_gpt2_gelu_target"
+_GPT2_GELU_MODULE = "transformers.activations"
+_GPT2_GELU_CLASS = "NewGELUActivation"
+_OPT_POSITIONAL_MARKER = "_pyodide_pytorch_webgpu_opt_positional_target"
+_OPT_POSITIONAL_MODULE = "transformers.models.opt.modeling_opt"
+_OPT_POSITIONAL_CLASS = "OPTLearnedPositionalEmbedding"
+_OPT_SDPA_SCALING_MARKER = "_pyodide_pytorch_webgpu_opt_sdpa_scaling_target"
+_OPT_SDPA_MODULE = "transformers.models.opt.modeling_opt"
+_OPT_SDPA_CLASS = "OPTSdpaAttention"
 
 
 class TransformersBrowserProfileError(RuntimeError):
@@ -758,6 +776,446 @@ def enable_webgpu_rms_norm_fusion() -> dict[str, object]:
         "targets": targets,
     }
 
+
+def _make_webgpu_gpt2_conv1d_forward(
+    original_forward: Callable[[Any, Any], Any],
+    target_name: str,
+    torch: ModuleType,
+) -> Callable[[Any, Any], Any]:
+    @wraps(original_forward)
+    def webgpu_gpt2_conv1d_forward(self: Any, x: Any) -> Any:
+        try:
+            eligible = (
+                x.device.type == "webgpu"
+                and x.dtype == torch.float32
+                and self.weight.device == x.device
+                and self.bias.device == x.device
+                and self.weight.dtype == x.dtype
+                and self.bias.dtype == x.dtype
+                and self.weight.dim() == 2
+                and tuple(self.weight.shape) == (self.nx, self.nf)
+                and self.bias.dim() == 1
+                and self.bias.size(0) == self.nf
+                and x.dim() >= 1
+                and x.size(-1) == self.nx
+            )
+            is_grad_enabled = getattr(torch, "is_grad_enabled", None)
+            if eligible and callable(is_grad_enabled) and is_grad_enabled():
+                eligible = not any(
+                    bool(getattr(tensor, "requires_grad", False))
+                    for tensor in (x, self.weight, self.bias)
+                )
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            eligible = False
+        if not eligible:
+            return original_forward(self, x)
+        output_shape = x.size()[:-1] + (self.nf,)
+        output = torch.nn.functional.linear(
+            x.view(-1, x.size(-1)),
+            self.weight.transpose(0, 1),
+            self.bias,
+        )
+        return output.view(output_shape)
+
+    setattr(webgpu_gpt2_conv1d_forward, _GPT2_CONV1D_MARKER, target_name)
+    return webgpu_gpt2_conv1d_forward
+
+
+def _make_webgpu_gpt2_gelu_forward(
+    original_forward: Callable[[Any, Any], Any],
+    target_name: str,
+    torch: ModuleType,
+) -> Callable[[Any, Any], Any]:
+    @wraps(original_forward)
+    def webgpu_gpt2_gelu_forward(self: Any, input: Any) -> Any:
+        try:
+            eligible = input.device.type == "webgpu" and input.dtype == torch.float32
+            is_grad_enabled = getattr(torch, "is_grad_enabled", None)
+            if eligible and callable(is_grad_enabled) and is_grad_enabled():
+                eligible = not bool(getattr(input, "requires_grad", False))
+        except (AttributeError, TypeError, RuntimeError):
+            eligible = False
+        if not eligible:
+            return original_forward(self, input)
+        return torch.nn.functional.gelu(input, approximate="tanh")
+
+    setattr(webgpu_gpt2_gelu_forward, _GPT2_GELU_MARKER, target_name)
+    return webgpu_gpt2_gelu_forward
+
+
+def enable_webgpu_gpt2_operator_compatibility() -> dict[str, object]:
+    """Route pinned GPT-2 affine and GELU compositions through native kernels."""
+    try:
+        import torch
+        import transformers
+    except ImportError as error:
+        raise TransformersBrowserProfileError(
+            "WebGPU GPT-2 operator compatibility requires torch and Transformers; "
+            "no classes were changed"
+        ) from error
+    installed_version = getattr(transformers, "__version__", "<unknown>")
+    if installed_version != _SUPPORTED_TRANSFORMERS_VERSION:
+        raise TransformersBrowserProfileError(
+            "WebGPU GPT-2 operator compatibility supports exactly Transformers "
+            f"{_SUPPORTED_TRANSFORMERS_VERSION}; found {installed_version}. "
+            "No classes were changed."
+        )
+    functional = getattr(getattr(torch, "nn", None), "functional", None)
+    if not callable(getattr(functional, "linear", None)) or not callable(
+        getattr(functional, "gelu", None)
+    ):
+        raise TransformersBrowserProfileError(
+            "WebGPU GPT-2 operator compatibility requires linear and gelu; "
+            "no classes were changed"
+        )
+    specs = (
+        (_GPT2_CONV1D_MODULE, _GPT2_CONV1D_CLASS, _GPT2_CONV1D_MARKER,
+         ("self", "x"), _make_webgpu_gpt2_conv1d_forward),
+        (_GPT2_GELU_MODULE, _GPT2_GELU_CLASS, _GPT2_GELU_MARKER,
+         ("self", "input"), _make_webgpu_gpt2_gelu_forward),
+    )
+    resolved: list[tuple[type[Any], Callable[..., Any], str, Callable[..., Any], bool]] = []
+    for module_name, class_name, marker_name, parameters, wrapper in specs:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as error:
+            raise TransformersBrowserProfileError(
+                f"WebGPU GPT-2 operator compatibility could not import {module_name}: "
+                f"{error}. No classes were changed."
+            ) from error
+        target_class = getattr(module, class_name, None)
+        target_name = f"{module_name}.{class_name}"
+        if not isinstance(target_class, type) or target_class.__module__ != module_name or target_class.__name__ != class_name:
+            raise TransformersBrowserProfileError(
+                f"WebGPU GPT-2 operator compatibility expected {target_name}; no classes were changed"
+            )
+        forward = getattr(target_class, "forward", None)
+        marker = getattr(forward, marker_name, None)
+        if marker is not None and marker != target_name:
+            raise TransformersBrowserProfileError(
+                f"WebGPU GPT-2 operator compatibility found an incompatible adapter on {target_name}; no classes were changed"
+            )
+        already = marker == target_name
+        if not already and (
+            not inspect.isfunction(forward)
+            or forward.__module__ != module_name
+            or forward.__qualname__ != f"{class_name}.forward"
+            or tuple(inspect.signature(forward).parameters) != parameters
+        ):
+            raise TransformersBrowserProfileError(
+                f"WebGPU GPT-2 operator compatibility found an unexpected forward on {target_name}; no classes were changed"
+            )
+        resolved.append((target_class, forward, target_name, wrapper, already))
+    targets = []
+    newly = already_count = 0
+    for target_class, forward, target_name, wrapper, already in resolved:
+        if already:
+            status = "already_enabled"; already_count += 1
+        else:
+            target_class.forward = wrapper(forward, target_name, torch)  # type: ignore[method-assign]
+            status = "patched"; newly += 1
+        targets.append({"target": target_name, "status": status})
+    return {
+        "enabled": True,
+        "profile": "transformers-4.46.3-webgpu-gpt2-operators",
+        "transformers_version": installed_version,
+        "supported_transformers_version": _SUPPORTED_TRANSFORMERS_VERSION,
+        "newly_patched": newly,
+        "already_patched": already_count,
+        "unsupported_addmm_dispatches_avoided_per_conv1d_call": 1,
+        "composite_gelu_dispatches_replaced_per_call": 1,
+        "targets": targets,
+    }
+
+
+def _make_webgpu_opt_positional_forward(
+    original_forward: Callable[..., Any],
+    target_name: str,
+    torch: ModuleType,
+) -> Callable[..., Any]:
+    @wraps(original_forward)
+    def webgpu_opt_positional_forward(
+        self: Any,
+        attention_mask: Any,
+        past_key_values_length: int = 0,
+        position_ids: Any = None,
+    ) -> Any:
+        try:
+            index_source = position_ids if position_ids is not None else attention_mask
+            eligible = (
+                index_source.device.type == "webgpu"
+                and index_source.dtype in (torch.long, torch.float32)
+                and index_source.dim() == 2
+                and isinstance(past_key_values_length, int)
+                and 0 <= past_key_values_length <= attention_mask.size(1)
+                and self.offset == 2
+                and self.padding_idx is None
+                and self.max_norm is None
+                and self.scale_grad_by_freq is False
+                and self.sparse is False
+                and self.weight.device == index_source.device
+            )
+            if position_ids is not None:
+                eligible = eligible and position_ids.dtype == torch.long
+            is_grad_enabled = getattr(torch, "is_grad_enabled", None)
+            if eligible and callable(is_grad_enabled) and is_grad_enabled():
+                eligible = not bool(getattr(self.weight, "requires_grad", False))
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            eligible = False
+        if not eligible:
+            return original_forward(self, attention_mask, past_key_values_length, position_ids)
+        if position_ids is None:
+            positions = torch.cumsum(attention_mask, dim=1)
+            positions = (positions * attention_mask).long()
+            positions = positions[:, past_key_values_length:]
+            embedding_weight = self.weight[self.offset - 1 :]
+        else:
+            positions = position_ids
+            embedding_weight = self.weight[self.offset :]
+        return torch.nn.functional.embedding(
+            positions,
+            embedding_weight,
+            self.padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
+
+    setattr(webgpu_opt_positional_forward, _OPT_POSITIONAL_MARKER, target_name)
+    return webgpu_opt_positional_forward
+
+
+def _make_webgpu_opt_sdpa_scaling_forward(
+    original_forward: Callable[..., Any],
+    target_name: str,
+    torch: ModuleType,
+) -> Callable[..., Any]:
+    @wraps(original_forward)
+    def webgpu_opt_sdpa_scaling_forward(
+        self: Any,
+        hidden_states: Any,
+        key_value_states: Any = None,
+        past_key_value: Any = None,
+        attention_mask: Any = None,
+        layer_head_mask: Any = None,
+        output_attentions: bool = False,
+        position_ids: Any = None,
+    ) -> Any:
+        try:
+            eligible = (
+                hidden_states.device.type == "webgpu"
+                and hidden_states.dtype == torch.float32
+                and not self.training
+                and isinstance(self.scaling, float)
+            )
+            if attention_mask is not None:
+                eligible = eligible and attention_mask.device == hidden_states.device and attention_mask.dtype == hidden_states.dtype
+            is_grad_enabled = getattr(torch, "is_grad_enabled", None)
+            if eligible and callable(is_grad_enabled) and is_grad_enabled():
+                eligible = not bool(getattr(hidden_states, "requires_grad", False))
+        except (AttributeError, TypeError, RuntimeError):
+            eligible = False
+        if not eligible:
+            return original_forward(
+                self, hidden_states, key_value_states, past_key_value,
+                attention_mask, layer_head_mask, output_attentions, position_ids
+            )
+        original_scaling = self.scaling
+        self.scaling = torch.tensor(
+            original_scaling,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        try:
+            return original_forward(
+                self, hidden_states, key_value_states, past_key_value,
+                attention_mask, layer_head_mask, output_attentions, position_ids
+            )
+        finally:
+            self.scaling = original_scaling
+
+    setattr(webgpu_opt_sdpa_scaling_forward, _OPT_SDPA_SCALING_MARKER, target_name)
+    return webgpu_opt_sdpa_scaling_forward
+
+
+def enable_webgpu_opt_operator_compatibility() -> dict[str, object]:
+    """Adapt pinned OPT positional indexing and SDPA scaling for WebGPU."""
+    try:
+        import torch
+        import transformers
+    except ImportError as error:
+        raise TransformersBrowserProfileError(
+            "WebGPU OPT operator compatibility requires torch and Transformers; no classes were changed"
+        ) from error
+    installed_version = getattr(transformers, "__version__", "<unknown>")
+    if installed_version != _SUPPORTED_TRANSFORMERS_VERSION:
+        raise TransformersBrowserProfileError(
+            "WebGPU OPT operator compatibility supports exactly Transformers "
+            f"{_SUPPORTED_TRANSFORMERS_VERSION}; found {installed_version}. No classes were changed."
+        )
+    functional = getattr(getattr(torch, "nn", None), "functional", None)
+    if not callable(getattr(functional, "embedding", None)) or not callable(getattr(torch, "cumsum", None)) or not callable(getattr(torch, "tensor", None)):
+        raise TransformersBrowserProfileError(
+            "WebGPU OPT operator compatibility requires cumsum, tensor, and embedding; no classes were changed"
+        )
+    specs = (
+        (_OPT_POSITIONAL_MODULE, _OPT_POSITIONAL_CLASS, _OPT_POSITIONAL_MARKER,
+         ("self", "attention_mask", "past_key_values_length", "position_ids"),
+         _make_webgpu_opt_positional_forward),
+        (_OPT_SDPA_MODULE, _OPT_SDPA_CLASS, _OPT_SDPA_SCALING_MARKER,
+         ("self", "hidden_states", "key_value_states", "past_key_value", "attention_mask", "layer_head_mask", "output_attentions", "position_ids"),
+         _make_webgpu_opt_sdpa_scaling_forward),
+    )
+    resolved: list[tuple[type[Any], Callable[..., Any], str, Callable[..., Any], bool]] = []
+    for module_name, class_name, marker_name, parameters, wrapper in specs:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as error:
+            raise TransformersBrowserProfileError(
+                f"WebGPU OPT operator compatibility could not import {module_name}: {error}. No classes were changed."
+            ) from error
+        target_class = getattr(module, class_name, None)
+        target_name = f"{module_name}.{class_name}"
+        if not isinstance(target_class, type) or target_class.__module__ != module_name or target_class.__name__ != class_name:
+            raise TransformersBrowserProfileError(
+                f"WebGPU OPT operator compatibility expected {target_name}; no classes were changed"
+            )
+        forward = getattr(target_class, "forward", None)
+        marker = getattr(forward, marker_name, None)
+        if marker is not None and marker != target_name:
+            raise TransformersBrowserProfileError(
+                f"WebGPU OPT operator compatibility found an incompatible adapter on {target_name}; no classes were changed"
+            )
+        already = marker == target_name
+        if not already and (
+            not inspect.isfunction(forward)
+            or forward.__module__ != module_name
+            or forward.__qualname__ != f"{class_name}.forward"
+            or tuple(inspect.signature(forward).parameters) != parameters
+        ):
+            raise TransformersBrowserProfileError(
+                f"WebGPU OPT operator compatibility found an unexpected forward on {target_name}; no classes were changed"
+            )
+        resolved.append((target_class, forward, target_name, wrapper, already))
+    targets = []
+    newly = already_count = 0
+    for target_class, forward, target_name, wrapper, already in resolved:
+        if already:
+            status = "already_enabled"; already_count += 1
+        else:
+            target_class.forward = wrapper(forward, target_name, torch)  # type: ignore[method-assign]
+            status = "patched"; newly += 1
+        targets.append({"target": target_name, "status": status})
+    return {
+        "enabled": True,
+        "profile": "transformers-4.46.3-webgpu-opt-operators",
+        "transformers_version": installed_version,
+        "supported_transformers_version": _SUPPORTED_TRANSFORMERS_VERSION,
+        "newly_patched": newly,
+        "already_patched": already_count,
+        "long_scalar_dispatches_avoided_with_explicit_positions": 1,
+        "long_scalar_dispatches_avoided_with_generated_positions": 2,
+        "host_scalar_lifts_avoided_per_sdpa_call": 1,
+        "targets": targets,
+    }
+
+
+def _make_webgpu_bert_sdpa_mask_prepare(
+    original_prepare: Callable[..., Any],
+    target_name: str,
+    torch: ModuleType,
+) -> Callable[..., Any]:
+    @wraps(original_prepare)
+    def webgpu_bert_sdpa_mask_prepare(
+        mask: Any, dtype: Any, tgt_len: int | None = None
+    ) -> Any:
+        try:
+            is_webgpu = mask.device.type == "webgpu"
+        except (AttributeError, TypeError, RuntimeError):
+            is_webgpu = False
+        if not is_webgpu:
+            return original_prepare(mask, dtype, tgt_len)
+        batch_size, source_length = mask.size()
+        target_length = tgt_len if tgt_len is not None else source_length
+        expanded_mask = mask[:, None, None, :].expand(
+            batch_size, 1, target_length, source_length
+        ).to(dtype)
+        inverted_mask = torch.neg(torch.ops.aten.sub.Scalar(expanded_mask, 1.0))
+        masked_positions = torch.ops.aten.eq.Scalar(mask, 0)
+        masked_positions = masked_positions[:, None, None, :].expand(
+            batch_size, 1, target_length, source_length
+        )
+        return inverted_mask.masked_fill(masked_positions, torch.finfo(dtype).min)
+
+    setattr(webgpu_bert_sdpa_mask_prepare, _BERT_SDPA_MASK_MARKER, target_name)
+    return webgpu_bert_sdpa_mask_prepare
+
+
+def enable_webgpu_bert_sdpa_mask_compatibility() -> dict[str, object]:
+    """Avoid BERT's data-dependent SDPA mask truth readback on WebGPU."""
+    try:
+        import torch
+        import transformers
+    except ImportError as error:
+        raise TransformersBrowserProfileError(
+            "WebGPU BERT SDPA mask compatibility requires torch and Transformers; no functions were changed"
+        ) from error
+    installed_version = getattr(transformers, "__version__", "<unknown>")
+    if installed_version != _SUPPORTED_TRANSFORMERS_VERSION:
+        raise TransformersBrowserProfileError(
+            "WebGPU BERT SDPA mask compatibility supports exactly Transformers "
+            f"{_SUPPORTED_TRANSFORMERS_VERSION}; found {installed_version}. No functions were changed."
+        )
+    aten_ops = getattr(getattr(torch, "ops", None), "aten", None)
+    scalar_sub = getattr(getattr(aten_ops, "sub", None), "Scalar", None)
+    scalar_eq = getattr(getattr(aten_ops, "eq", None), "Scalar", None)
+    if not callable(scalar_sub) or not callable(scalar_eq) or not callable(getattr(torch, "neg", None)) or not callable(getattr(torch, "finfo", None)):
+        raise TransformersBrowserProfileError(
+            "WebGPU BERT SDPA mask compatibility requires sub.Scalar, eq.Scalar, neg, and finfo; no functions were changed"
+        )
+    try:
+        bert_module = importlib.import_module(_BERT_SDPA_MASK_MODULE)
+        utils_module = importlib.import_module(_BERT_SDPA_MASK_UTILS_MODULE)
+    except Exception as error:
+        raise TransformersBrowserProfileError(
+            f"WebGPU BERT SDPA mask compatibility could not import pinned modules: {error}. No functions were changed."
+        ) from error
+    target_name = f"{_BERT_SDPA_MASK_MODULE}.{_BERT_SDPA_MASK_HELPER}"
+    prepare = getattr(bert_module, _BERT_SDPA_MASK_HELPER, None)
+    marker = getattr(prepare, _BERT_SDPA_MASK_MARKER, None)
+    if marker is not None and marker != target_name:
+        raise TransformersBrowserProfileError(
+            f"WebGPU BERT SDPA mask compatibility found an incompatible adapter on {target_name}; no functions were changed"
+        )
+    already = marker == target_name
+    expected_parameters = ("mask", "dtype", "tgt_len")
+    if not already and (
+        not inspect.isfunction(prepare)
+        or prepare.__module__ != _BERT_SDPA_MASK_UTILS_MODULE
+        or prepare.__name__ != _BERT_SDPA_MASK_HELPER
+        or tuple(inspect.signature(prepare).parameters) != expected_parameters
+    ):
+        raise TransformersBrowserProfileError(
+            "WebGPU BERT SDPA mask compatibility found an unexpected helper; no functions were changed"
+        )
+    expand_mask = getattr(utils_module, _BERT_EXPAND_MASK_HELPER, None)
+    if not inspect.isfunction(expand_mask) or expand_mask.__module__ != _BERT_SDPA_MASK_UTILS_MODULE or expand_mask.__name__ != _BERT_EXPAND_MASK_HELPER or tuple(inspect.signature(expand_mask).parameters) != expected_parameters:
+        raise TransformersBrowserProfileError(
+            "WebGPU BERT SDPA mask compatibility found an unexpected expansion helper; no functions were changed"
+        )
+    if not already:
+        setattr(bert_module, _BERT_SDPA_MASK_HELPER, _make_webgpu_bert_sdpa_mask_prepare(prepare, target_name, torch))
+    return {
+        "enabled": True,
+        "profile": "transformers-4.46.3-webgpu-bert-sdpa-mask",
+        "transformers_version": installed_version,
+        "supported_transformers_version": _SUPPORTED_TRANSFORMERS_VERSION,
+        "newly_patched": 0 if already else 1,
+        "already_patched": 1 if already else 0,
+        "host_mask_truth_readbacks_avoided_per_webgpu_call": 1,
+        "targets": [{"target": target_name, "status": "already_enabled" if already else "patched"}],
+    }
 
 def _make_webgpu_opt_sdpa_mask_update(
     original_update: Callable[..., Any],

@@ -268,6 +268,9 @@ import transformers
 from transformers.utils import is_tokenizers_available
 from transformers_browser_bootstrap import (
     disable_optional_gguf_without_tokenizers,
+    enable_webgpu_bert_sdpa_mask_compatibility,
+    enable_webgpu_gpt2_operator_compatibility,
+    enable_webgpu_opt_operator_compatibility,
     enable_webgpu_opt_sdpa_mask_compatibility,
     enable_webgpu_preallocated_kv_cache,
     enable_webgpu_rms_norm_fusion,
@@ -280,6 +283,7 @@ from transformers_q8 import (
     convert_linear_modules_q8_,
 )
 from transformers_gemma2_webgpu import (
+    enable_webgpu_gemma2_logit_softcapping,
     enable_webgpu_gemma2_rms_norm,
     enable_webgpu_gemma2_scalar_normalizer,
 )
@@ -289,6 +293,9 @@ webgpu_rotary_scaling_compatibility = (
     enable_webgpu_rotary_scaling_compatibility()
 )
 webgpu_swiglu_fusion = enable_webgpu_swiglu_fusion()
+webgpu_gpt2_operator_compatibility = enable_webgpu_gpt2_operator_compatibility()
+webgpu_opt_operator_compatibility = enable_webgpu_opt_operator_compatibility()
+webgpu_bert_sdpa_mask_compatibility = enable_webgpu_bert_sdpa_mask_compatibility()
 webgpu_opt_sdpa_mask_compatibility = (
     enable_webgpu_opt_sdpa_mask_compatibility()
 )
@@ -297,6 +304,7 @@ webgpu_gemma2_rms_norm = enable_webgpu_gemma2_rms_norm()
 webgpu_gemma2_scalar_normalizer = (
     enable_webgpu_gemma2_scalar_normalizer()
 )
+webgpu_gemma2_logit_softcapping = enable_webgpu_gemma2_logit_softcapping()
 webgpu_q8_device_supported = bool(js.globalThis.__torchWebGPUFixed32Subgroups)
 webgpu_q8_linear = {
     "enabled": webgpu_q8_device_supported,
@@ -326,12 +334,16 @@ json.dumps({
         webgpu_rotary_scaling_compatibility
     ),
     "webgpu_swiglu_fusion": webgpu_swiglu_fusion,
+    "webgpu_gpt2_operator_compatibility": webgpu_gpt2_operator_compatibility,
+    "webgpu_opt_operator_compatibility": webgpu_opt_operator_compatibility,
+    "webgpu_bert_sdpa_mask_compatibility": webgpu_bert_sdpa_mask_compatibility,
     "webgpu_opt_sdpa_mask_compatibility": (
         webgpu_opt_sdpa_mask_compatibility
     ),
     "webgpu_preallocated_kv_cache": webgpu_preallocated_kv_cache,
     "webgpu_gemma2_rms_norm": webgpu_gemma2_rms_norm,
     "webgpu_gemma2_scalar_normalizer": webgpu_gemma2_scalar_normalizer,
+    "webgpu_gemma2_logit_softcapping": webgpu_gemma2_logit_softcapping,
     "webgpu_q8_linear": webgpu_q8_linear,
 })
 `);
@@ -389,6 +401,42 @@ json.dumps({
     ) {
       throw new Error("The pinned Transformers WebGPU SwiGLU adapter was not enabled.");
     }
+    const gpt2Operators = details.webgpu_gpt2_operator_compatibility;
+    if (
+      gpt2Operators?.enabled !== true ||
+      gpt2Operators.profile !== "transformers-4.46.3-webgpu-gpt2-operators" ||
+      gpt2Operators.transformers_version !== details.transformers_version ||
+      gpt2Operators.newly_patched + gpt2Operators.already_patched !== 2 ||
+      gpt2Operators.targets?.length !== 2 ||
+      gpt2Operators.unsupported_addmm_dispatches_avoided_per_conv1d_call !== 1 ||
+      gpt2Operators.composite_gelu_dispatches_replaced_per_call !== 1
+    ) {
+      throw new Error("The pinned Transformers WebGPU GPT-2 operator adapter was not enabled.");
+    }
+    const optOperators = details.webgpu_opt_operator_compatibility;
+    if (
+      optOperators?.enabled !== true ||
+      optOperators.profile !== "transformers-4.46.3-webgpu-opt-operators" ||
+      optOperators.transformers_version !== details.transformers_version ||
+      optOperators.newly_patched + optOperators.already_patched !== 2 ||
+      optOperators.targets?.length !== 2 ||
+      optOperators.long_scalar_dispatches_avoided_with_explicit_positions !== 1 ||
+      optOperators.long_scalar_dispatches_avoided_with_generated_positions !== 2 ||
+      optOperators.host_scalar_lifts_avoided_per_sdpa_call !== 1
+    ) {
+      throw new Error("The pinned Transformers WebGPU OPT operator adapter was not enabled.");
+    }
+    const bertSdpaMask = details.webgpu_bert_sdpa_mask_compatibility;
+    if (
+      bertSdpaMask?.enabled !== true ||
+      bertSdpaMask.profile !== "transformers-4.46.3-webgpu-bert-sdpa-mask" ||
+      bertSdpaMask.transformers_version !== details.transformers_version ||
+      bertSdpaMask.newly_patched + bertSdpaMask.already_patched !== 1 ||
+      bertSdpaMask.targets?.length !== 1 ||
+      bertSdpaMask.host_mask_truth_readbacks_avoided_per_webgpu_call !== 1
+    ) {
+      throw new Error("The pinned Transformers WebGPU BERT SDPA-mask adapter was not enabled.");
+    }
     const optSdpaMask = details.webgpu_opt_sdpa_mask_compatibility;
     if (
       optSdpaMask?.enabled !== true ||
@@ -412,6 +460,17 @@ json.dumps({
       throw new Error("The pinned Transformers WebGPU preallocated KV cache was not registered.");
     }
     const q8Linear = details.webgpu_q8_linear;
+    const gemma2LogitSoftcap = details.webgpu_gemma2_logit_softcapping;
+    if (
+      gemma2LogitSoftcap?.enabled !== true ||
+      gemma2LogitSoftcap.profile !==
+        "transformers-4.46.3-webgpu-gemma2-logit-softcapping" ||
+      gemma2LogitSoftcap.transformers_version !== details.transformers_version ||
+      gemma2LogitSoftcap.newly_patched + gemma2LogitSoftcap.already_patched !== 1 ||
+      gemma2LogitSoftcap.mixed_device_scalar_operations_avoided_per_forward !== 2
+    ) {
+      throw new Error("The pinned Transformers Gemma2 logit-softcapping adapter was not enabled.");
+    }
     const gemma2RmsNorm = details.webgpu_gemma2_rms_norm;
     if (
       gemma2RmsNorm?.enabled !== true ||
