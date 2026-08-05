@@ -1,7 +1,7 @@
 [pytorch]
 repository = "https://github.com/pytorch/pytorch.git"
 ref = "cf30153c4c131c8164ee7798e5022d810682e2cb"
-version = "2.13.0+pyodide314.0.2.r5"
+version = "2.13.0+pyodide314.0.2.r6"
 
 [torch_webgpu]
 repository = "https://github.com/jmaczan/torch-webgpu.git"
@@ -28,7 +28,7 @@ library = "libopenblas.so"
 sha256 = "5489d82d8b00ddd3ba283055ba14e2a03d870f1b7e9c07873d6064a8c306ea4c"
 
 [release]
-tag = "torch-2.13.0-pyodide-314.0.2-r5"
+tag = "torch-2.13.0-pyodide-314.0.2-r6"
 
 [build]
 max_jobs = 3

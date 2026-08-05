@@ -25,11 +25,11 @@ playground.
 
 | Component | Version |
 | --- | --- |
-| PyTorch | `2.13.0+pyodide314.0.2.r5` |
+| PyTorch | `2.13.0+pyodide314.0.2.r6` |
 | Pyodide | `314.0.2` |
 | Python | `3.14.2` (`cp314`) |
 | WebAssembly platform | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r5` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r6` |
 
 The complete, ABI-relevant configuration lives in
 [`config/build.toml`](config/build.toml). A wheel is compatible only with the

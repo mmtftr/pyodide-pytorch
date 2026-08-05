@@ -15,6 +15,10 @@ if (modeArgument && modeArgument !== "--validate-only") {
   throw new Error(`unsupported playground test mode: ${modeArgument}`);
 }
 const validateOnly = modeArgument === "--validate-only";
+const adapterMode = process.env.WEBGPU_ADAPTER ?? "swiftshader";
+if (!new Set(["hardware", "swiftshader"]).has(adapterMode)) {
+  throw new Error(`unsupported WEBGPU_ADAPTER mode: ${adapterMode}`);
+}
 
 const publicDirectory = path.resolve(publicArgument);
 if (!fs.existsSync(publicDirectory)) {
@@ -199,10 +203,26 @@ let browser;
 try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
+  const browserArguments = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--enable-unsafe-webgpu",
+    "--enable-dawn-features=allow_unsafe_apis",
+    "--disable-dawn-features=use_dxc",
+    "--enable-webgpu-developer-features",
+    "--use-gpu-in-tests",
+    "--enable-accelerated-2d-canvas",
+  ];
+  if (adapterMode === "swiftshader") {
+    browserArguments.push(
+      "--enable-unsafe-swiftshader",
+      "--use-webgpu-adapter=swiftshader",
+    );
+  }
   browser = await puppeteer.launch({
     executablePath: chrome,
     headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    args: browserArguments,
   });
   const page = await browser.newPage();
   const browserErrors = [];
@@ -320,27 +340,35 @@ try {
     throw new Error("runtime omitted the pinned WebGPU Gemma2 diagnostics");
   }
 
+  const waitForExampleOutput = async (marker, timeout) => {
+    try {
+      await page.waitForFunction(
+        (expected) =>
+          document.querySelector("#output")?.textContent.includes(expected),
+        { timeout },
+        marker,
+      );
+    } catch (error) {
+      const output = await page.$eval(
+        "#output",
+        (element) => element.textContent,
+      );
+      throw new Error(
+        `example never printed ${JSON.stringify(marker)} within ${timeout}ms ` +
+          `(${error.name}); #output was:\n${output}`,
+      );
+    }
+  };
+
   await page.click("#run-button");
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector("#output")
-        ?.textContent.includes("gradient: [2.0, 4.0, 6.0]"),
-    { timeout: 30_000 },
-  );
+  await waitForExampleOutput("gradient: [2.0, 4.0, 6.0]", 30_000);
   await page.waitForFunction(
     () => !document.querySelector("#run-button")?.disabled,
     { timeout: 30_000 },
   );
   await page.select("#example-select", "transformersTiny");
   await page.click("#run-button");
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector("#output")
-        ?.textContent.includes("WebGPU forward: passed"),
-    { timeout: 180_000 },
-  );
+  await waitForExampleOutput("WebGPU forward: passed", 180_000);
   const transformersOutput = await page.$eval(
     "#output",
     (element) => element.textContent,
