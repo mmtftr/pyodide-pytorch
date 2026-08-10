@@ -105,6 +105,13 @@ class WebGPUArchitectureCoverageContractTests(unittest.TestCase):
             "return at::div(lhs, *scalar);",
         ):
             self.assertIn(expression, self.patch)
+        self.assertIn("is_mixed_float_integer", self.patch)
+        self.assertIn(
+            "mixed_float_integer_tensor<BinaryOp::Add>", self.patch
+        )
+        self.assertIn(
+            "mixed_float_integer_tensor<BinaryOp::Sub>", self.patch
+        )
 
     def test_staging_and_raw_numerical_gate_cover_new_shaders(self) -> None:
         self.assertEqual(

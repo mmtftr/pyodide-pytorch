@@ -74,7 +74,8 @@ unboxed into shader uniforms; the WebGPU tensor is never transferred to CPU.
 Noncanonical inputs are contained rather than silently reinterpreted. These
 operators cover BLOOM ALiBi and T5 relative-position buckets.
 
-Mixed float/integer multiplication and tensor power cover ALiBi scaling. A
+Mixed float/integer add, subtract, multiply, and tensor power cover mask and
+ALiBi promotion without host transfers. A
 fused float32 `baddbmm` handles BLOOM's eager score path, including broadcast
 `self`, `alpha`, and `beta`. Existing softmax and BMM kernels complete BLOOM
 and T5 eager attention.
