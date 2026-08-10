@@ -4,7 +4,7 @@ struct Params {
     input_offset: u32,
     scalar_bits: u32,
     dispatch_x: u32,
-    _pad0: u32,
+    comparison: u32,
     _pad1: u32,
     _pad2: u32,
     sizes0: vec4<u32>,
@@ -44,13 +44,16 @@ fn canonical_high(low: u32) -> u32 {
     return select(0u, 0xffffffffu, (low & 0x80000000u) != 0u);
 }
 
-fn less_than_scalar(storage_index: u32) -> bool {
+fn compare_scalar(storage_index: u32) -> bool {
     let word = storage_index * 2u;
     let low = input[word];
     let high = input[word + 1u];
     // Fail closed for Long values outside the signed-int32 profile.
-    return high == canonical_high(low) &&
-        bitcast<i32>(low) < bitcast<i32>(params.scalar_bits);
+    if (high != canonical_high(low)) { return false; }
+    if (params.comparison == 0u) {
+        return bitcast<i32>(low) < bitcast<i32>(params.scalar_bits);
+    }
+    return bitcast<i32>(low) > bitcast<i32>(params.scalar_bits);
 }
 
 @compute @workgroup_size(64)
@@ -66,7 +69,7 @@ fn main(
     for (var byte = 0u; byte < 4u; byte++) {
         let linear_index = first_index + byte;
         if (linear_index < params.length &&
-                less_than_scalar(input_index(linear_index))) {
+                compare_scalar(input_index(linear_index))) {
             packed |= 1u << (byte * 8u);
         }
     }

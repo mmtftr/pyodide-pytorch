@@ -1,12 +1,12 @@
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const SHELL_CACHE = `${CACHE_PREFIX}shell-v11`;
+const SHELL_CACHE = `${CACHE_PREFIX}shell-v12`;
 const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-v7`;
 const SHELL_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
-  "./app.js?v=11",
-  "./worker.js?v=11",
+  "./app.js?v=12",
+  "./worker.js?v=12",
   "./transformers_browser_bootstrap.py",
   "./transformers_gemma2_webgpu.py",
   "./transformers_q8.py",

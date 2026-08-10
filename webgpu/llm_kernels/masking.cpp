@@ -1,4 +1,5 @@
 #include "llm_common.h"
+#include "long_arithmetic.h"
 
 #include <ATen/ExpandUtils.h>
 #include <ATen/ops/mul_ops.h>
@@ -373,7 +374,8 @@ struct WhereParams {
   std::uint32_t rhs_scalar_bits;
   std::uint32_t output_offset;
   std::uint32_t dispatch_x;
-  std::uint32_t padding[2];
+  std::uint32_t output_kind;
+  std::uint32_t padding;
   std::uint32_t output_sizes[8];
   std::uint32_t condition_sizes[8];
   std::uint32_t condition_strides[8];
@@ -396,13 +398,13 @@ void check_where_value(
     const at::Tensor& condition,
     const char* operation) {
   TORCH_CHECK(
-      tensor.scalar_type() == at::kFloat,
+      tensor.scalar_type() == at::kFloat || tensor.scalar_type() == at::kLong,
       operation,
-      " supports only float32 result tensors");
+      " supports only float32 or restricted-Long result tensors");
   if (is_cpu_float_scalar(tensor)) {
     return;
   }
-  check_strided(tensor, operation, at::kFloat);
+  check_strided(tensor, operation, tensor.scalar_type());
   check_same_device(tensor, condition, operation);
   validate_storage_span(tensor, operation);
 }
@@ -413,6 +415,10 @@ at::Tensor where_self(
     const at::Tensor& rhs) {
   constexpr const char* operation = "WebGPU where.self";
   check_strided(condition, operation, at::kBool);
+  TORCH_CHECK(
+      lhs.scalar_type() == rhs.scalar_type(),
+      operation,
+      " requires matching result dtypes");
   check_where_value(lhs, condition, operation);
   check_where_value(rhs, condition, operation);
   auto output_shape = at::infer_size(condition.sizes(), lhs.sizes());
@@ -423,7 +429,7 @@ at::Tensor where_self(
       " broadcast result has more than eight dimensions");
   auto output = at::empty(
       output_shape,
-      condition.options().dtype(at::kFloat),
+      condition.options().dtype(lhs.scalar_type()),
       c10::MemoryFormat::Contiguous);
   if (output.numel() == 0) {
     return output;
@@ -452,6 +458,7 @@ at::Tensor where_self(
   params.lhs_scalar_bits = lhs_scalar ? float_bits(lhs.item<float>()) : 0;
   params.rhs_scalar_bits = rhs_scalar ? float_bits(rhs.item<float>()) : 0;
   params.output_offset = checked_u32(output.storage_offset(), "where.self output offset");
+  params.output_kind = lhs.scalar_type() == at::kLong ? 1u : 0u;
   write_output_shape(output_shape, params.output_sizes);
   write_shape(
       params,
@@ -554,6 +561,11 @@ at::Tensor& mul_tensor_inplace(
     const at::Tensor& rhs) {
   if (lhs.scalar_type() == at::kFloat && rhs.scalar_type() == at::kBool) {
     return mul_bool_inplace(lhs, rhs);
+  }
+  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong) {
+    auto result = mul_long_tensor(lhs, rhs);
+    copy_strided(result, lhs);
+    return lhs;
   }
 
   // Registering a dtype-specialized kernel still replaces mul_.Tensor for the

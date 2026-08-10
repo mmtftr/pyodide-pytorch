@@ -1,4 +1,5 @@
 #include "llm_common.h"
+#include "long_arithmetic.h"
 
 #include <ATen/TensorIterator.h>
 
@@ -216,6 +217,14 @@ at::Tensor add_scalar(
     const at::Tensor& input,
     const at::Scalar& other,
     const at::Scalar& alpha) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar(
+        input,
+        other,
+        alpha,
+        LongScalarOperation::Add,
+        "WebGPU restricted Long add.Scalar");
+  }
   return scalar_binary(
       input, other, alpha, ScalarBinaryOp::Add, "WebGPU add.Scalar");
 }
@@ -225,6 +234,15 @@ at::Tensor& add_scalar_out(
     const at::Scalar& other,
     const at::Scalar& alpha,
     at::Tensor& output) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar_out(
+        input,
+        other,
+        alpha,
+        output,
+        LongScalarOperation::Add,
+        "WebGPU restricted Long add.Scalar");
+  }
   return scalar_binary_out(
       input, other, alpha, output, ScalarBinaryOp::Add, "WebGPU add.Scalar");
 }
@@ -240,6 +258,14 @@ at::Tensor sub_scalar(
     const at::Tensor& input,
     const at::Scalar& other,
     const at::Scalar& alpha) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar(
+        input,
+        other,
+        alpha,
+        LongScalarOperation::Subtract,
+        "WebGPU restricted Long sub.Scalar");
+  }
   return scalar_binary(
       input, other, alpha, ScalarBinaryOp::Sub, "WebGPU sub.Scalar");
 }
@@ -249,6 +275,15 @@ at::Tensor& sub_scalar_out(
     const at::Scalar& other,
     const at::Scalar& alpha,
     at::Tensor& output) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar_out(
+        input,
+        other,
+        alpha,
+        output,
+        LongScalarOperation::Subtract,
+        "WebGPU restricted Long sub.Scalar");
+  }
   return scalar_binary_out(
       input, other, alpha, output, ScalarBinaryOp::Sub, "WebGPU sub.Scalar");
 }
@@ -263,6 +298,14 @@ at::Tensor& sub_scalar_(
 at::Tensor mul_scalar(
     const at::Tensor& input,
     const at::Scalar& other) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar(
+        input,
+        other,
+        1,
+        LongScalarOperation::Multiply,
+        "WebGPU restricted Long mul.Scalar");
+  }
   return scalar_binary(
       input, other, 1, ScalarBinaryOp::Mul, "WebGPU mul.Scalar");
 }
@@ -271,6 +314,15 @@ at::Tensor& mul_scalar_out(
     const at::Tensor& input,
     const at::Scalar& other,
     at::Tensor& output) {
+  if (input.scalar_type() == at::kLong) {
+    return long_scalar_out(
+        input,
+        other,
+        1,
+        output,
+        LongScalarOperation::Multiply,
+        "WebGPU restricted Long mul.Scalar");
+  }
   return scalar_binary_out(
       input, other, 1, output, ScalarBinaryOp::Mul, "WebGPU mul.Scalar");
 }

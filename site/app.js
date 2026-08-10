@@ -8,7 +8,7 @@ import { basicSetup, EditorView } from "codemirror";
 
 const REPOSITORY = "mmtftr/pyodide-pytorch";
 const CACHE_PREFIX = "pyodide-pytorch-playground-";
-const ASSET_VERSION = "11";
+const ASSET_VERSION = "12";
 const RUNTIME_BASE_URL = new URL("./runtime/", document.baseURI);
 const PUBLISHED_MANIFEST_URL = new URL("build-manifest.json", RUNTIME_BASE_URL);
 
@@ -94,7 +94,7 @@ from transformers_browser_bootstrap import (
 
 if not torch.webgpu.is_available():
     raise RuntimeError("WebGPU is not available in this browser")
-await torch.webgpu.init()
+torch.webgpu.init()
 
 assert importlib.util.find_spec("tokenizers") is None
 rms_norm_fusion = enable_webgpu_rms_norm_fusion()
@@ -133,7 +133,7 @@ gpu_inputs = {
 before = torch.webgpu.diagnostics()
 with torch.no_grad(), torch.webgpu.batch():
     gpu_logits = model(**gpu_inputs).logits
-actual_logits = await torch.webgpu.to_cpu_async(gpu_logits)
+actual_logits = gpu_logits.cpu()
 after = torch.webgpu.diagnostics()
 torch.testing.assert_close(actual_logits, expected_logits, rtol=2e-3, atol=2e-4)
 dispatches = int(after["dispatches"] - before["dispatches"])
@@ -197,7 +197,7 @@ import torch.nn.functional as F
 if not torch.webgpu.is_available():
     raise RuntimeError("WebGPU is not available in this browser")
 
-await torch.webgpu.init()
+torch.webgpu.init()
 
 # A deterministic pre-norm decoder block. The shapes are intentionally small
 # enough for an interactive browser check, but the data flow is real:
@@ -282,12 +282,12 @@ with torch.no_grad():
 
     # Warm-up compiles and caches pipelines. It is excluded from timed work.
     gpu_logits = gpu_decoder_forward()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
 
     started = time.perf_counter()
     for _ in range(GPU_REPEATS):
         gpu_logits = gpu_decoder_forward()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
     gpu_ms = (time.perf_counter() - started) * 1_000 / GPU_REPEATS
 
     started = time.perf_counter()
@@ -296,7 +296,7 @@ with torch.no_grad():
     cpu_ms = (time.perf_counter() - started) * 1_000 / CPU_REPEATS
 
     readback_started = time.perf_counter()
-    result = await torch.webgpu.to_cpu_async(gpu_logits)
+    result = gpu_logits.cpu()
     readback_ms = (time.perf_counter() - readback_started) * 1_000
 
 torch.testing.assert_close(result, cpu_logits, rtol=2e-4, atol=2e-5)
@@ -315,7 +315,7 @@ print(f"correctness: CPU and WebGPU logits match · checksum={result.sum().item(
 print(f"WebGPU: {gpu_ms:.2f} ms/forward · {BATCH * TOKENS * 1_000 / gpu_ms:.1f} tokens/s")
 print(f"CPU:    {cpu_ms:.2f} ms/forward")
 print(f"GPU/CPU time ratio: {gpu_ms / cpu_ms:.2f}x")
-print(f"final asynchronous readback: {readback_ms:.2f} ms")
+print(f"final JSPI readback: {readback_ms:.2f} ms")
 print(
     f"dispatches: {dispatches} total · "
     f"{dispatches / (GPU_REPEATS + 1):.0f}/forward · "
@@ -332,7 +332,7 @@ import torch
 if not torch.webgpu.is_available():
     raise RuntimeError("WebGPU is not available in this browser")
 
-await torch.webgpu.init()
+torch.webgpu.init()
 
 elements = 1_048_576
 iterations = 10
@@ -351,18 +351,18 @@ upload_ms = (time.perf_counter() - upload_started) * 1_000
 
 # Warm up pipeline creation before timing.
 warmup = left * right + left
-await torch.webgpu.synchronize()
+torch.webgpu.synchronize()
 
 first_kernel = torch.webgpu.kernel_submissions()
 started = time.perf_counter()
 for _ in range(iterations):
     result = left * right + left
-await torch.webgpu.synchronize()
+torch.webgpu.synchronize()
 webgpu_ms = (time.perf_counter() - started) * 1_000
 kernels = torch.webgpu.kernel_submissions() - first_kernel
 
 readback_started = time.perf_counter()
-result_cpu = await torch.webgpu.to_cpu_async(result)
+result_cpu = result.cpu()
 readback_ms = (time.perf_counter() - readback_started) * 1_000
 torch.testing.assert_close(result_cpu, expected)
 
@@ -424,17 +424,22 @@ const COMMON_COMPLETIONS = [
   {
     label: "torch.webgpu.init",
     type: "function",
-    detail: "await torch.webgpu.init()",
+    detail: "torch.webgpu.init()",
   },
   {
     label: "torch.webgpu.synchronize",
     type: "function",
-    detail: "await torch.webgpu.synchronize()",
+    detail: "torch.webgpu.synchronize()",
+  },
+  {
+    label: "torch.Tensor.cpu",
+    type: "function",
+    detail: "tensor.cpu()",
   },
   {
     label: "torch.webgpu.to_cpu_async",
     type: "function",
-    detail: "await torch.webgpu.to_cpu_async(tensor)",
+    detail: "await torch.webgpu.to_cpu_async(tensor)  # non-JSPI fallback",
   },
 ];
 

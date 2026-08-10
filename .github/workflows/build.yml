@@ -2,6 +2,19 @@ name: Build PyTorch wheel
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "config/**"
+      - "patches/**"
+      - "vendor/**"
+      - "webgpu/**"
+      - "scripts/**"
+      - "site/**"
+      - "tests/**"
+      - ".github/workflows/build.yml"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/publish-release.yml"
   push:
     branches: [main]
     paths:
@@ -340,6 +353,9 @@ jobs:
           # Validate canonical restricted-Long cumsum and isin generation
           # plumbing, including inverted membership and strided inputs.
           node tests/webgpu-generation-long-wgsl.mjs
+          # Close the pinned BLOOM/T5 architecture surface with direct shader
+          # compilation and numerical checks before loading the wheel.
+          node tests/webgpu-architecture-kernels-wgsl.mjs
           node tests/smoke.mjs \
             "${{ steps.wheel.outputs.path }}" \
             "$PYTORCH_VERSION" \

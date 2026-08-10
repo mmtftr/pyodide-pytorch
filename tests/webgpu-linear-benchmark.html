@@ -90,7 +90,7 @@ import torch.nn.functional as F
 import torch.webgpu
 
 assert torch.webgpu.is_available()
-await torch.webgpu.init(device=js.webgpuTestDevice)
+torch.webgpu.init(device=js.webgpuTestDevice)
 
 state = getattr(js.globalThis, "__torchWebGPU")
 subgroup_s4_available = bool(js.webgpuTest.subgroupS4Available)
@@ -180,14 +180,14 @@ async def measure_variant(input_gpu, weight_gpu, bias_gpu, variant, repeats):
     select_variant(variant)
     for _ in range(12):
         output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
 
     samples = []
     for _ in range(7):
         start = time.perf_counter()
         for _ in range(repeats):
             output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
-        await torch.webgpu.synchronize()
+        torch.webgpu.synchronize()
         samples.append((time.perf_counter() - start) * 1000 / repeats)
     return samples
 

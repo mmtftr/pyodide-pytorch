@@ -29,27 +29,31 @@ tensors back through the CPU.
 | `creation.cpp`, `arange.wgsl`, `fill.wgsl` | Float32/int32/restricted-Long `arange` plus contiguous scalar fill, including packed Bool, used by `full`/`ones` composites |
 | `copy.cpp`, `strided_copy.wgsl` | Raw packed-Bool, 32-bit, or two-word Long clone/contiguous materialization and concatenation for ranks up to eight |
 | `embedding.cpp`, `embedding.wgsl` | Float32 embedding weights with contiguous int32 or canonical restricted-Long indices |
-| `generation_control.cpp`, `any_bool.wgsl`, `bitwise_not_bool.wgsl`, `long_lt_scalar.wgsl`, `mul_bool_tensor.wgsl` | Bool `any`/`bitwise_not`/`mul.Tensor` and restricted-Long `lt.Scalar` generation control |
+| `generation_control.cpp`, `any_bool.wgsl`, `bitwise_not_bool.wgsl`, `long_lt_scalar.wgsl`, `mul_bool_tensor.wgsl` | Bool `any`/`bitwise_not`/`mul.Tensor` and restricted-Long `lt.Scalar`/`gt.Scalar` generation control |
 | `generation_long.cpp`, `long_cumsum.wgsl`, `long_isin.wgsl` | Restricted-Long last-dimension `cumsum` and tensor membership with packed-Bool output |
 | `gemma_rms_norm.cpp`, `gemma_rms_norm.wgsl` | Fused float32 Gemma2 offset-weight RMSNorm, preserving `normalized * (1 + weight)` |
 | `kv_cache.cpp`, `kv_cache_update.wgsl` | One-dispatch paired K/V writes into a fixed-capacity float32 decode cache using int32 or restricted-Long positions |
-| `masking.cpp`, `gt_tensor.wgsl`, `triangular.wgsl`, `where_float.wgsl`, `mul_bool_inplace.wgsl` | Bounded broadcast comparison, triangular masks, float selection, and in-place Float-by-Bool mask construction used by pinned Gemma2 |
+| `long_arithmetic.cpp`, `long_arithmetic.wgsl`, `mixed_pow.wgsl` | Broadcast restricted-Long tensor/scalar arithmetic, `abs`, `minimum`, checked profile containment, and mixed float/integer tensor power for T5 buckets and BLOOM ALiBi |
+| `masking.cpp`, `gt_tensor.wgsl`, `triangular.wgsl`, `where_float.wgsl`, `mul_bool_inplace.wgsl` | Bounded broadcast comparison, triangular masks, float/Long selection, and in-place Float-by-Bool or restricted-Long mask construction |
 | `masked_fill.cpp`, `masked_fill_scalar.wgsl` | Broadcast float32 `masked_fill.Scalar` with strided packed-Bool masks |
 | `q8_linear.cpp`, `linear_gemv_q8_s4.wgsl` | Opt-in one-row group-128 signed-Q8 linear with fixed-32 subgroup reduction, int32-packed weights, and per-row-group float32 scales |
-| `matmul.cpp`, `bmm.wgsl` | Strided 3-D BMM, equal-rank batched matmul, and linear composition through the existing 2-D MM kernel |
+| `matmul.cpp`, `bmm.wgsl`, `baddbmm.wgsl` | Strided 3-D BMM, fused broadcast `baddbmm`, equal-rank batched matmul, and linear composition through the existing 2-D MM kernel |
 | `normalization.cpp`, `layer_norm.wgsl`, `rms_norm.wgsl` | Float32 inference `native_layer_norm` output/mean/rstd with affine parameters and stable Welford reduction, plus RMSNorm |
 | `reduction.cpp`, `mean_dim.wgsl` | Single-dimension float32 `mean.dim`, including `keepdim`, strided views, and reduction tails |
 | `scalar_binary.cpp`, `scalar_binary.wgsl` | Float32 `add/sub/mul/div` scalar, scalar-out, and scalar-in-place overloads without materializing a host scalar tensor |
 | `swiglu.cpp`, `swiglu_gemv*.wgsl` | One-row float32 fused gate/up GEMV and SiLU multiplication for decode-time Llama-family MLPs, with a fixed-32 subgroup specialization and portable fallback |
-| `type_conversion.cpp`, `int_to_float.wgsl`, `bool_to_long.wgsl` | Same-device `_to_copy`, including strided packed-Bool copies, packed Bool to canonical limited-int64, and int32/limited-int64 to float32 conversion |
+| `type_conversion.cpp`, `int_to_float.wgsl`, `bool_to_long.wgsl` | Same-device `_to_copy`, including strided packed-Bool copies, packed Bool to canonical limited-int64, checked truncating float32 to limited-int64, and int32/limited-int64 to float32 conversion |
+| `browser_unary.cpp` | Browser-owned float unary registrations plus restricted-Long `abs`/`neg`, without modifying the pinned vendor snapshot |
 | `attention.cpp`, `sdpa.wgsl` | Float32 inference SDPA with causal alignment, broadcast additive masks, and grouped-query head mapping |
 
-The browser acceptance test also exercises the stock Transformers 4.46.3
+The browser acceptance tests also exercise the stock Transformers 4.46.3
 RMSNorm reduction and position-ID cast patterns before composing rotary
 position encoding from metadata views, negation, concatenation,
 multiplication, and addition. These operators are enough for the checked
 full-sequence tiny GPT block and the central float32 Llama-family primitives.
-They are not enough for arbitrary LLM repositories: generic upstream
+The enforced profile covers ten deterministic tiny model families: Qwen2,
+Llama, Mistral, GPT-2, BERT, Phi-3, OPT, BLOOM, T5, and Gemma2. It is not enough
+for arbitrary LLM repositories: generic upstream
 StaticCache/sliding/beam mutations, sampling/top-k, reduced precision,
 quantization, model loading, and custom operators are outside this profile.
 
@@ -115,21 +119,24 @@ implementation, which owns aligned queue upload and Long range validation;
 noncontiguous CPU sources require an explicit Contiguous memory format.
 Same-device WebGPU copies use the project shader's packed-byte/raw-word path,
 preserving dense strides and both Long words.
-Numeric conversion on WebGPU is limited to packed Bool-to-Long,
-int32-to-float32, and signed-int32-valued Long-to-float32. Bool-to-Long reads
+Numeric conversion on WebGPU is limited to packed Bool-to-Long, checked
+truncating float32-to-Long, int32-to-float32, and signed-int32-valued
+Long-to-float32. Bool-to-Long reads
 arbitrary nonnegative strided views and returns contiguous ordinary eight-byte
 Long storage with canonical zero/one low words and zero high words. Other
 limited Long values retain a canonical low i32 plus sign-extension word; the
 float cast reads the low word after CPU upload and GPU producers validate that
 invariant. Other devices and dtype conversions fail explicitly.
 
-The scalar binary registrations accept real scalar values with float32 WebGPU
-inputs, ranks up to eight, and nonnegative strides. Functional, generated
-scalar-out, and in-place overloads are registered for all four operations;
-`alpha` is honored for add and subtract. If an output shares its GPUBuffer with
-an input, scalar and tensor binary paths first compute into a temporary and
-then use the strided GPU copy kernel. This avoids WebGPU's forbidden
-read-only/writable binding alias without reading data back to the host.
+The scalar binary registrations accept real scalar values with float32 or
+restricted-Long WebGPU inputs, ranks up to eight, and nonnegative strides.
+Float32 supports add/subtract/multiply/divide; restricted Long supports
+add/subtract/multiply, and every result must remain in the signed-int32 value
+profile. `alpha` is honored for add and subtract. If an output shares its
+GPUBuffer with an input, scalar and tensor binary paths first compute into a
+temporary and then use the strided GPU copy kernel. This avoids WebGPU's
+forbidden read-only/writable binding alias without reading data back to the
+host.
 
 `webgpu::fused_swiglu` accepts contiguous float32 inference tensors and
 exactly one flattened input row. Gate and up weights must have the same

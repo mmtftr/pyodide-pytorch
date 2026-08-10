@@ -92,7 +92,7 @@ class BoolToLongSourceContractTests(unittest.TestCase):
             implementation,
         )
         self.assertIn(
-            "!convert_bool_to_long && format == c10::MemoryFormat::Preserve",
+            "!convert_bool_to_long && !convert_float_to_long &&",
             implementation,
         )
         self.assertIn(

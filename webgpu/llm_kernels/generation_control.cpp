@@ -362,17 +362,21 @@ struct LongLtScalarParams {
   std::uint32_t input_offset;
   std::uint32_t scalar_bits;
   std::uint32_t dispatch_x;
-  std::uint32_t padding[3];
+  std::uint32_t comparison;
+  std::uint32_t padding[2];
   std::uint32_t sizes[8];
   std::uint32_t input_strides[8];
 };
 
 static_assert(sizeof(LongLtScalarParams) == 96);
 
-at::Tensor long_lt_scalar(
+at::Tensor long_compare_scalar(
     const at::Tensor& input,
-    const at::Scalar& other) {
-  constexpr const char* operation = "WebGPU restricted Long lt.Scalar";
+    const at::Scalar& other,
+    bool greater) {
+  const auto* operation = greater
+      ? "WebGPU restricted Long gt.Scalar"
+      : "WebGPU restricted Long lt.Scalar";
   check_strided_tensor(input, operation, at::kLong);
   const auto scalar = scalar_to_i32(other, operation);
   auto output = at::empty(
@@ -389,8 +393,9 @@ at::Tensor long_lt_scalar(
   params.length = checked_u32(input.numel(), "Long lt.Scalar element count");
   params.ndim = checked_u32(input.dim(), "Long lt.Scalar input rank");
   params.input_offset =
-      checked_u32(input.storage_offset(), "Long lt.Scalar input offset");
+      checked_u32(input.storage_offset(), "Long comparison input offset");
   params.scalar_bits = raw_bits(scalar);
+  params.comparison = greater ? 1u : 0u;
   write_shape(
       input, params.sizes, params.input_strides, operation);
   const auto shape = dispatch_words(params.length, operation);
@@ -407,6 +412,18 @@ at::Tensor long_lt_scalar(
   return output;
 }
 
+at::Tensor long_lt_scalar(
+    const at::Tensor& input,
+    const at::Scalar& other) {
+  return long_compare_scalar(input, other, false);
+}
+
+at::Tensor long_gt_scalar(
+    const at::Tensor& input,
+    const at::Scalar& other) {
+  return long_compare_scalar(input, other, true);
+}
+
 } // namespace
 
 at::Tensor mul_bool_tensor(
@@ -419,6 +436,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
   module.impl("any", TORCH_FN(any_bool));
   module.impl("bitwise_not", TORCH_FN(bitwise_not_bool));
   module.impl("lt.Scalar", TORCH_FN(long_lt_scalar));
+  module.impl("gt.Scalar", TORCH_FN(long_gt_scalar));
 }
 
 } // namespace pyodide_pytorch::webgpu::llm
