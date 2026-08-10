@@ -71,7 +71,9 @@ class WebGPUArchitectureCoverageContractTests(unittest.TestCase):
         self.assertIn("static_assert(sizeof(PowParams) == 192);", self.long_cpp)
         self.assertIn("params.exponent_words == 2u", self.pow_shader)
         self.assertIn("expected_high", self.pow_shader)
-        self.assertIn("0x7fc00000u", self.pow_shader)
+        self.assertIn(
+            "exponent[exponent_word + 1u] | 0x7fc00000u", self.pow_shader
+        )
         self.assertIn("dim + params.exponent_ndim >= params.ndim", self.pow_shader)
 
     def test_baddbmm_is_fused_broadcasted_and_registered(self) -> None:

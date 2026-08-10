@@ -75,7 +75,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let expected_high = select(
             0u, 0xffffffffu, (exponent_low & 0x80000000u) != 0u);
         if (exponent[exponent_word + 1u] != expected_high) {
-            output[linear_index] = bitcast<f32>(0x7fc00000u);
+            // Derive the NaN payload from storage so WebGPU validators do not
+            // reject a non-finite constant while the invalid value remains
+            // visibly contained instead of being silently truncated.
+            let invalid_bits =
+                exponent[exponent_word + 1u] | 0x7fc00000u;
+            output[linear_index] = bitcast<f32>(invalid_bits);
             return;
         }
     }
