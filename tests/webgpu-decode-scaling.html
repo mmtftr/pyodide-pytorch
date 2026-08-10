@@ -268,7 +268,7 @@ import torch.webgpu
 
 
 assert torch.webgpu.is_available()
-await torch.webgpu.init(device=js.webgpuTestDevice)
+torch.webgpu.init(device=js.webgpuTestDevice)
 
 model = dict(js.webgpuTest.modelConfig.to_py())
 variant = str(js.webgpuTest.variant)
@@ -353,7 +353,7 @@ async def measure_projection(name, inner, columns, calls_per_layer):
 
     for _ in range(warmups):
         output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
 
     actual = await to_numpy_async(output_gpu)
     np.testing.assert_allclose(
@@ -369,7 +369,7 @@ async def measure_projection(name, inner, columns, calls_per_layer):
         started = time.perf_counter()
         for _ in range(repeats):
             output_gpu = F.linear(input_gpu, weight_gpu, bias_gpu)
-        await torch.webgpu.synchronize()
+        torch.webgpu.synchronize()
         wall_samples.append((time.perf_counter() - started) * 1000 / repeats)
         timestamp_ranges.append(
             [timestamp_start, int(js.webgpuTimestampCount())]
@@ -406,7 +406,7 @@ async def measure_projection(name, inner, columns, calls_per_layer):
 
     del actual, output_gpu, input_gpu, weight_gpu, bias_gpu, bias_cpu
     gc.collect()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
     result["live_buffers_after"] = int(state.buffers.size)
     result["post_cleanup_diagnostics"] = torch.webgpu.diagnostics()
     return result

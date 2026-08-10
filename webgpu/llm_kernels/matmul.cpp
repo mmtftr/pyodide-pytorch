@@ -1,6 +1,8 @@
 #include "llm_common.h"
 
 #include <array>
+#include <cstring>
+#include <limits>
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
@@ -45,6 +47,18 @@ ComputeKernel& bmm_kernel() {
       "pyodide-pytorch bmm",
       shaders::kBmm,
       {wgpu::BufferBindingType::ReadOnlyStorage,
+       wgpu::BufferBindingType::ReadOnlyStorage,
+       wgpu::BufferBindingType::Storage,
+       wgpu::BufferBindingType::Uniform});
+  return kernel;
+}
+
+ComputeKernel& baddbmm_kernel() {
+  static ComputeKernel kernel = make_kernel(
+      "pyodide-pytorch fused baddbmm",
+      shaders::kBaddbmm,
+      {wgpu::BufferBindingType::ReadOnlyStorage,
+       wgpu::BufferBindingType::ReadOnlyStorage,
        wgpu::BufferBindingType::ReadOnlyStorage,
        wgpu::BufferBindingType::Storage,
        wgpu::BufferBindingType::Uniform});
@@ -115,6 +129,72 @@ struct BmmParams {
 
 static_assert(sizeof(BmmParams) == 80);
 
+struct BaddbmmParams {
+  std::uint32_t batch;
+  std::uint32_t rows;
+  std::uint32_t columns;
+  std::uint32_t inner;
+  std::uint32_t self_ndim;
+  std::uint32_t self_offset;
+  std::uint32_t lhs_offset;
+  std::uint32_t rhs_offset;
+  std::uint32_t output_offset;
+  std::uint32_t alpha_bits;
+  std::uint32_t beta_bits;
+  std::uint32_t padding;
+  std::uint32_t self_sizes[4];
+  std::uint32_t self_strides[4];
+  std::uint32_t lhs_strides[4];
+  std::uint32_t rhs_strides[4];
+};
+
+static_assert(sizeof(BaddbmmParams) == 112);
+
+std::uint32_t float_bits(const at::Scalar& scalar, const char* operation) {
+  TORCH_CHECK(
+      scalar.isIntegral(true) || scalar.isFloatingPoint(),
+      operation,
+      " requires real alpha and beta scalars");
+  const auto value = scalar.toFloat();
+  std::uint32_t result;
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
+
+void validate_float_span(const at::Tensor& tensor, const char* operation) {
+  if (tensor.numel() == 0) {
+    return;
+  }
+  std::uint64_t maximum = static_cast<std::uint64_t>(
+      checked_u32(tensor.storage_offset(), "float32 storage offset"));
+  for (const auto dim : c10::irange(tensor.dim())) {
+    TORCH_CHECK(
+        tensor.stride(dim) >= 0,
+        operation,
+        " does not support negative strides");
+    const auto size = static_cast<std::uint64_t>(tensor.size(dim));
+    const auto stride = static_cast<std::uint64_t>(tensor.stride(dim));
+    if (size > 0) {
+      TORCH_CHECK(
+          stride == 0 ||
+              size - 1 <=
+                  (std::numeric_limits<std::uint64_t>::max() - maximum) /
+                      stride,
+          operation,
+          " storage span overflow");
+      maximum += (size - 1) * stride;
+    }
+  }
+  TORCH_CHECK(
+      maximum <= std::numeric_limits<std::uint32_t>::max(),
+      operation,
+      " storage address exceeds WGSL uint32 indexing");
+  TORCH_CHECK(
+      maximum < allocation(tensor).buffer.GetSize() / tensor.element_size(),
+      operation,
+      " view exceeds its GPUBuffer storage");
+}
+
 struct LinearParams {
   std::uint32_t rows;
   std::uint32_t columns;
@@ -159,6 +239,9 @@ at::Tensor& bmm_out_impl(
   if (output.numel() == 0) {
     return output;
   }
+  validate_float_span(lhs, "WebGPU bmm");
+  validate_float_span(rhs, "WebGPU bmm");
+  validate_float_span(output, "WebGPU bmm");
 
   BmmParams params{};
   params.batch = checked_u32(lhs.size(0), "bmm batch");
@@ -199,6 +282,114 @@ at::Tensor bmm_impl(const at::Tensor& lhs, const at::Tensor& rhs) {
   auto output = at::empty(
       {lhs.size(0), lhs.size(1), rhs.size(2)}, lhs.options());
   return bmm_out_impl(lhs, rhs, output);
+}
+
+at::Tensor baddbmm_impl(
+    const at::Tensor& self,
+    const at::Tensor& lhs,
+    const at::Tensor& rhs,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  constexpr const char* operation = "WebGPU fused baddbmm";
+  check_inference_tensor(self, operation, at::kFloat);
+  check_inference_tensor(lhs, operation, at::kFloat);
+  check_inference_tensor(rhs, operation, at::kFloat);
+  TORCH_CHECK(
+      self.device() == lhs.device() && lhs.device() == rhs.device(),
+      operation,
+      " requires all tensors on the same WebGPU device");
+  TORCH_CHECK(lhs.dim() == 3 && rhs.dim() == 3, operation, " expects 3-D batches");
+  TORCH_CHECK(lhs.size(0) == rhs.size(0), operation, " batch mismatch");
+  TORCH_CHECK(lhs.size(2) == rhs.size(1), operation, " inner-dimension mismatch");
+  const auto output_shape =
+      std::vector<std::int64_t>{lhs.size(0), lhs.size(1), rhs.size(2)};
+  const auto broadcast_shape = at::infer_size(self.sizes(), output_shape);
+  TORCH_CHECK(
+      c10::IntArrayRef(broadcast_shape) == c10::IntArrayRef(output_shape),
+      operation,
+      " self is not broadcastable to the batch product");
+  TORCH_CHECK(self.dim() <= 3, operation, " supports self rank at most three");
+  auto output = at::empty(output_shape, lhs.options(), c10::MemoryFormat::Contiguous);
+  if (output.numel() == 0) {
+    return output;
+  }
+  validate_float_span(self, operation);
+  validate_float_span(lhs, operation);
+  validate_float_span(rhs, operation);
+  validate_float_span(output, operation);
+
+  BaddbmmParams params{};
+  params.batch = checked_u32(lhs.size(0), "baddbmm batch");
+  params.rows = checked_u32(lhs.size(1), "baddbmm rows");
+  params.columns = checked_u32(rhs.size(2), "baddbmm columns");
+  params.inner = checked_u32(lhs.size(2), "baddbmm inner dimension");
+  params.self_ndim = checked_u32(self.dim(), "baddbmm self rank");
+  params.self_offset = checked_u32(self.storage_offset(), "baddbmm self offset");
+  params.lhs_offset = checked_u32(lhs.storage_offset(), "baddbmm lhs offset");
+  params.rhs_offset = checked_u32(rhs.storage_offset(), "baddbmm rhs offset");
+  params.output_offset = checked_u32(output.storage_offset(), "baddbmm output offset");
+  params.alpha_bits = float_bits(alpha, operation);
+  params.beta_bits = float_bits(beta, operation);
+  for (const auto dim : c10::irange(self.dim())) {
+    TORCH_CHECK(self.stride(dim) >= 0, operation, " does not support negative self strides");
+    params.self_sizes[dim] = checked_u32(self.size(dim), "baddbmm self size");
+    params.self_strides[dim] = checked_u32(self.stride(dim), "baddbmm self stride");
+  }
+  for (const auto dim : c10::irange(3)) {
+    TORCH_CHECK(
+        lhs.stride(dim) >= 0 && rhs.stride(dim) >= 0,
+        operation,
+        " does not support negative matrix strides");
+    params.lhs_strides[dim] = checked_u32(lhs.stride(dim), "baddbmm lhs stride");
+    params.rhs_strides[dim] = checked_u32(rhs.stride(dim), "baddbmm rhs stride");
+  }
+  TORCH_CHECK(
+      params.batch <= kMaxWorkgroupsPerDimension,
+      operation,
+      " batch exceeds WebGPU dispatch limits");
+  const auto dispatch_x = divide_rounding_up(params.columns, 8);
+  const auto dispatch_y = divide_rounding_up(params.rows, 8);
+  TORCH_CHECK(
+      dispatch_x <= kMaxWorkgroupsPerDimension &&
+          dispatch_y <= kMaxWorkgroupsPerDimension,
+      operation,
+      " matrix dimensions exceed WebGPU dispatch limits");
+  auto params_buffer = make_params_buffer("baddbmm params", params);
+  dispatch(
+      baddbmm_kernel(),
+      {tensor_entry(0, self),
+       tensor_entry(1, lhs),
+       tensor_entry(2, rhs),
+       tensor_entry(3, output),
+       buffer_entry(4, params_buffer, sizeof(params))},
+      dispatch_x,
+      dispatch_y,
+      params.batch);
+  return output;
+}
+
+at::Tensor& baddbmm_out_impl(
+    const at::Tensor& self,
+    const at::Tensor& lhs,
+    const at::Tensor& rhs,
+    const at::Scalar& beta,
+    const at::Scalar& alpha,
+    at::Tensor& output) {
+  auto result = baddbmm_impl(self, lhs, rhs, beta, alpha);
+  copy_strided(result, output);
+  return output;
+}
+
+at::Tensor& baddbmm_inplace_impl(
+    at::Tensor& self,
+    const at::Tensor& lhs,
+    const at::Tensor& rhs,
+    const at::Scalar& beta,
+    const at::Scalar& alpha) {
+  auto result = baddbmm_impl(self, lhs, rhs, beta, alpha);
+  TORCH_CHECK(result.sizes() == self.sizes(), "WebGPU baddbmm_ cannot expand self in-place");
+  copy_strided(result, self);
+  return self;
 }
 
 at::Tensor matmul_impl(const at::Tensor& lhs, const at::Tensor& rhs) {
@@ -381,6 +572,9 @@ at::Tensor& linear_out_impl(
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, module) {
+  module.impl("baddbmm", TORCH_FN(baddbmm_impl));
+  module.impl("baddbmm_", TORCH_FN(baddbmm_inplace_impl));
+  module.impl("baddbmm.out", TORCH_FN(baddbmm_out_impl));
   module.impl("bmm", TORCH_FN(bmm_impl));
   module.impl("bmm.out", TORCH_FN(bmm_out_impl));
   module.impl("matmul", TORCH_FN(matmul_impl));

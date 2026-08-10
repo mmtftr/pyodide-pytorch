@@ -9,7 +9,7 @@
 Run PyTorch in a browser or another Pyodide environment. This repository
 produces a reproducible WebAssembly wheel, tests it inside the exact Pyodide
 runtime it targets, and publishes the wheel with checksums and build
-provenance. The `r5` build contains an early browser WebGPU backend and a
+provenance. The `r7` build contains an early browser WebGPU backend and a
 release pipeline that promotes its exact browser-tested artifact to the
 playground.
 
@@ -25,11 +25,11 @@ playground.
 
 | Component | Version |
 | --- | --- |
-| PyTorch | `2.13.0+pyodide314.0.2.r6` |
+| PyTorch | `2.13.0+pyodide314.0.2.r7` |
 | Pyodide | `314.0.2` |
 | Python | `3.14.2` (`cp314`) |
 | WebAssembly platform | `pyemscripten_2026_0_wasm32` |
-| Release | `torch-2.13.0-pyodide-314.0.2-r6` |
+| Release | `torch-2.13.0-pyodide-314.0.2-r7` |
 
 The complete, ABI-relevant configuration lives in
 [`config/build.toml`](config/build.toml). A wheel is compatible only with the
@@ -110,20 +110,20 @@ on a CORS-enabled origin, and verify its published SHA-256 digest.
 
 ## Experimental WebGPU backend
 
-The `r5` release and development wheels built from `main` expose a real
+The `r7` release and development wheels built from `main` expose a real
 PyTorch `webgpu` device in browsers that implement WebGPU:
 
 ```python
 import torch
 
-await torch.webgpu.init()
+torch.webgpu.init()
 
 x = torch.tensor([[1.0], [2.0]]).to("webgpu")
 y = torch.tensor([[10.0, 20.0, 30.0]]).to("webgpu")
 result = torch.add(x, y, alpha=2)
 
 print(result.device)  # webgpu:0
-print(await torch.webgpu.to_cpu_async(result))
+print(result.cpu())
 ```
 
 The backend is intentionally bounded:
@@ -135,9 +135,9 @@ The backend is intentionally bounded:
   storage offsets, and `alpha` for addition;
 - metadata-only `view`, slice, and transpose operations;
 - CPU-to-GPU and GPU-to-GPU copies;
-- explicit asynchronous GPU-to-CPU readback through
-  `await torch.webgpu.to_cpu_async(tensor)`, plus JSPI-gated
-  `to_cpu_sync`, `.cpu()`, and `.item()` compatibility wrappers;
+- JSPI-backed synchronous initialization, synchronization, `.cpu()`, `.item()`,
+  and scalar truth, with `init_async`, `synchronize_async`, and
+  `to_cpu_async` retained as explicit non-JSPI fallbacks;
 - unsupported operations fail instead of silently falling back to the CPU.
 
 The browser-verified decoder inference slice includes:
@@ -154,10 +154,11 @@ maintained kernels are under `webgpu/llm_kernels`, not the pinned vendor trees.
 This does not yet include general cache implementations, sampling, arbitrary
 quantization formats, or reduced-precision activations.
 
-The synchronous wrappers require `pyodide.ffi.can_run_sync()` and an async
+The synchronous API requires `pyodide.ffi.can_run_sync()` and a stack-switching
 Python entrypoint: `runPythonAsync()` or PyProxy `callPromising()`. Code entered
 through `runPython()`, a direct synchronous PyProxy call, or a runtime without
-JSPI must use `to_cpu_async`. This is a `PrivateUse1` backend named `webgpu`;
+JSPI must use `init_async`, `synchronize_async`, and `to_cpu_async`. This is a
+`PrivateUse1` backend named `webgpu`;
 it does not claim CUDA compatibility and `torch.cuda.is_available()` remains
 false.
 
@@ -178,7 +179,7 @@ absent from stock Pyodide. See the
 | Autograd, `torch.nn`, and optimizers | Supported by runtime smoke tests |
 | `torch.linalg` | LAPACK-backed; 71 selected upstream linalg tests pass |
 | Serialization and selected `torch.func` operations | Supported by runtime smoke tests |
-| Experimental WebGPU (`r5`) | `float32` eager inference subset with explicit async readback; see the operator table |
+| Experimental WebGPU (`r7`) | `float32` eager inference subset with JSPI-backed synchronous Python APIs; see the operator table |
 | CUDA, ROCm, MPS, or XPU | Not available |
 | Multiprocessing, distributed training, and shared-memory tensors | Not available |
 | `torch.compile`, C++ extensions, and multithreaded CPU execution | Not available |

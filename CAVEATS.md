@@ -36,16 +36,16 @@ for shared WebAssembly memory.
 
 ## Experimental WebGPU backend
 
-The `r5` release and development wheels built from `main` include an
+The `r7` release and development wheels built from `main` include an
 experimental `PrivateUse1` backend named `webgpu`. It submits real WGSL
 compute work through the browser WebGPU API, but it is not a general PyTorch
 accelerator backend.
 
-Release `r5` supports one device and adds `torch.float32` model tensors,
+Release `r7` supports one device and adds `torch.float32` model tensors,
 int32 token IDs (or signed-int32-valued IDs in real int64 storage), CPU-to-GPU
 and GPU-to-GPU copies, elementwise operations,
-broadcasting, metadata-only views, matrix operations, and explicit
-asynchronous readback. It includes embedding, general
+broadcasting, metadata-only views, matrix operations, and JSPI-backed
+synchronous Python readback. It includes embedding, general
 strided materialization and concatenation, batched matrix multiplication and
 fused linear-with-bias layers, LayerNorm, RMSNorm, and fused causal attention
 with grouped query heads. Its browser gate executes a small full-sequence GPT
@@ -59,14 +59,16 @@ the explicit single-row group-128 Q8 linear prototype; neither is a general
 Transformers cache or quantization implementation. Unsupported
 operators raise errors; there is no implicit CPU fallback.
 
-Browser GPU-to-CPU transfer requires `GPUBuffer.mapAsync()`. The portable API
-is therefore still `await torch.webgpu.to_cpu_async(tensor)`. When Pyodide's
-JSPI stack switching is active, `torch.webgpu.to_cpu_sync(tensor)`, `.cpu()`,
-and `.item()` bridge to that coroutine. Python must be entered through
-`runPythonAsync()` or a PyProxy `callPromising()` call, and
-`pyodide.ffi.can_run_sync()` must return true. `runPython()`, direct synchronous
-PyProxy calls, and runtimes without JSPI fail with a directed error that names
-the async fallback. Chrome 137+ ships JSPI without a flag; Node 24 requires
+Browser GPU setup, synchronization, and GPU-to-CPU transfer ultimately use
+JavaScript promises. The default Python API keeps those await boundaries out
+of the model call graph with Pyodide's JSPI stack switching:
+`torch.webgpu.init()`, `torch.webgpu.synchronize()`, `.cpu()`, and `.item()`.
+Python must be entered through `runPythonAsync()` or a PyProxy
+`callPromising()` call, and `pyodide.ffi.can_run_sync()` must return true.
+`runPython()`, direct synchronous PyProxy calls, and runtimes without JSPI fail
+with a directed error naming `init_async`, `synchronize_async`, or
+`to_cpu_async` as appropriate. Chrome 137+ ships JSPI without a flag; Node 24
+requires
 `--experimental-wasm-jspi`. Feature-detect the capability rather than relying
 on a version check.
 

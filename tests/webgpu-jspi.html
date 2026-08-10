@@ -58,7 +58,7 @@ import torch.webgpu
 from pyodide.ffi import can_run_sync
 
 assert can_run_sync(), "runPythonAsync did not enable JSPI stack switching"
-await torch.webgpu.init(device=js.webgpuTestDevice)
+torch.webgpu.init(device=js.webgpuTestDevice)
 
 float_values = [1.25, -2.5, 3.75]
 float_gpu = torch.tensor(float_values, dtype=torch.float32).to("webgpu")
@@ -77,6 +77,7 @@ long_gpu = torch.tensor(long_values, dtype=torch.long).to("webgpu")
 long_async = await torch.webgpu.to_cpu_async(long_gpu)
 long_sync = torch.webgpu.to_cpu_sync(long_gpu)
 long_method = long_gpu.cpu()
+torch.webgpu.synchronize()
 
 # Each readback owns its CPU storage after the temporary NumPy array dies.
 gc.collect()
@@ -106,6 +107,7 @@ def sync_readback():
     "int32": int_method.tolist(),
     "int64": long_method.tolist(),
     "item": float_gpu[:1].item(),
+    "synchronize": True,
 }
 `);
     const diagnostics = result.toJs({ dict_converter: Object.fromEntries });

@@ -274,13 +274,18 @@ at::Tensor to_copy_impl(
       (input.scalar_type() == at::kInt || input.scalar_type() == at::kLong);
   const bool convert_bool_to_long =
       input.scalar_type() == at::kBool && target_dtype == at::kLong;
+  const bool convert_float_to_long =
+      input.scalar_type() == at::kFloat && target_dtype == at::kLong;
   TORCH_CHECK(
-      same_dtype || convert_to_float || convert_bool_to_long,
+      same_dtype || convert_to_float || convert_bool_to_long ||
+          convert_float_to_long,
       "WebGPU _to_copy supports only torch.bool to restricted torch.int64, "
-      "torch.int32/torch.int64 to torch.float32, or a same-dtype copy");
+      "torch.int32/torch.int64 to torch.float32, checked truncating "
+      "torch.float32 to restricted torch.int64, or a same-dtype copy");
 
   at::Tensor output;
-  if (!convert_bool_to_long && format == c10::MemoryFormat::Preserve &&
+  if (!convert_bool_to_long && !convert_float_to_long &&
+      format == c10::MemoryFormat::Preserve &&
       input.is_non_overlapping_and_dense()) {
     output = at::empty_strided(
         input.sizes(),
@@ -348,7 +353,8 @@ at::Tensor to_copy_impl(
       checked_u32(output.storage_offset(), "cast destination offset");
   params.source_word_width = source_word_width;
   params.destination_word_width = destination_word_width;
-  params.convert_to_float = convert_to_float ? 1 : 0;
+  params.convert_to_float =
+      convert_to_float ? 1u : (convert_float_to_long ? 2u : 0u);
   for (const auto dim : c10::irange(input.dim())) {
     params.sizes[dim] = checked_u32(input.size(dim), "cast input size");
     params.source_strides[dim] =

@@ -1,20 +1,20 @@
 From 1237fe5a9af7818a85bb86a1f54fa9e5b3676c25 Mon Sep 17 00:00:00 2001
 From: pytorch-pyodide maintainers <noreply@github.com>
 Date: Fri, 31 Jul 2026 16:26:13 +0400
-Subject: [PATCH 10/10] Add browser torch-webgpu eager kernel profile
+Subject: [PATCH 10/12] Add browser torch-webgpu eager kernel profile
 
 ---
  setup.py                                      |   1 +
- torch/CMakeLists.txt                          |  41 +
+ torch/CMakeLists.txt                          |  42 +
  torch/__init__.py                             |   3 +
- torch/csrc/webgpu/browser_ops.cpp             | 562 ++++++++++++++
+ torch/csrc/webgpu/browser_ops.cpp             | 689 +++++++++++++++++
  .../webgpu/compat/core/webgpu_allocator.h     |  21 +
  .../csrc/webgpu/compat/core/webgpu_context.h  |  21 +
  torch/csrc/webgpu/emdawnwebgpu_bridge.cpp     | 871 ++++++++++++++++++++++
  torch/csrc/webgpu/webgpu_backend.cpp          | 474 ++++++++++++
  torch/csrc/webgpu/webgpu_context.cpp          |  44 ++
- torch/webgpu/__init__.py                      | 438 +++++++++++
- 10 files changed, 2476 insertions(+)
+ torch/webgpu/__init__.py                      | 485 ++++++++++++
+ 10 files changed, 2651 insertions(+)
  create mode 100644 torch/csrc/webgpu/browser_ops.cpp
  create mode 100644 torch/csrc/webgpu/compat/core/webgpu_allocator.h
  create mode 100644 torch/csrc/webgpu/compat/core/webgpu_context.h
@@ -39,7 +39,7 @@ diff --git a/torch/CMakeLists.txt b/torch/CMakeLists.txt
 index 4587c64..36f6988 100644
 --- a/torch/CMakeLists.txt
 +++ b/torch/CMakeLists.txt
-@@ -39,6 +39,37 @@ set(TORCH_PYTHON_SRCS
+@@ -39,6 +39,38 @@ set(TORCH_PYTHON_SRCS
      ${GENERATED_CXX_PYTHON}
      )
  append_filelist("libtorch_python_core_sources" TORCH_PYTHON_SRCS)
@@ -52,7 +52,7 @@ index 4587c64..36f6988 100644
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/binary.cpp
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/unary.cpp
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/activation_functions.cpp
-+    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/trig.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/browser_unary.cpp
 +    ${TORCH_ROOT}/third_party/torch-webgpu/csrc/ops/scalar_unary.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/argmax.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/boolean.cpp
@@ -62,6 +62,7 @@ index 4587c64..36f6988 100644
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/gemma_rms_norm.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/generation_control.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/generation_long.cpp
++    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/long_arithmetic.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/kv_cache.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/matmul.cpp
 +    ${TORCH_ROOT}/third_party/pyodide-pytorch-webgpu/llm_kernels/masking.cpp
@@ -77,7 +78,7 @@ index 4587c64..36f6988 100644
  
  # NB: This has to match the condition under which the JIT test directory
  #     is included (at the time of writing that's in caffe2/CMakeLists.txt).
-@@ -76,6 +102,16 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
+@@ -76,6 +103,16 @@ set(TORCH_PYTHON_INCLUDE_DIRECTORIES
      ${TORCH_SRC_DIR}/standalone
      )
  
@@ -113,7 +114,7 @@ new file mode 100644
 index 0000000..3ee45d7
 --- /dev/null
 +++ b/torch/csrc/webgpu/browser_ops.cpp
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,689 @@
 +// Browser-safe registrations built from torch-webgpu's existing C++ dispatch
 +// helpers and WGSL. This file intentionally omits every upstream registration
 +// that can synchronously read back or invoke a CPU fallback.
@@ -129,6 +130,7 @@ index 0000000..3ee45d7
 +#include "core/webgpu_context.h"
 +#include "generation_control.h"
 +#include "llm_common.h"
++#include "long_arithmetic.h"
 +
 +#include <algorithm>
 +#include <cstdint>
@@ -164,6 +166,14 @@ index 0000000..3ee45d7
 +      description,
 +      " does not fit in uint32 WebGPU metadata");
 +  return static_cast<std::uint32_t>(value);
++}
++
++std::optional<at::Scalar> cpu_scalar_value(const at::Tensor& tensor) {
++  if (!tensor.device().is_cpu() || tensor.layout() != at::kStrided ||
++      tensor.dim() != 0 || tensor.numel() != 1) {
++    return std::nullopt;
++  }
++  return tensor.item();
 +}
 +
 +template <BinaryOp Op>
@@ -235,10 +245,53 @@ index 0000000..3ee45d7
 +  return output;
 +}
 +
++bool is_mixed_float_integer(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs) {
++  if (!lhs.device().is_privateuseone() ||
++      !rhs.device().is_privateuseone() || lhs.device() != rhs.device()) {
++    return false;
++  }
++  const auto is_integer = [](at::ScalarType type) {
++    return type == at::kInt || type == at::kLong;
++  };
++  return (lhs.scalar_type() == at::kFloat && is_integer(rhs.scalar_type())) ||
++      (rhs.scalar_type() == at::kFloat && is_integer(lhs.scalar_type()));
++}
++
++template <BinaryOp Op>
++at::Tensor mixed_float_integer_tensor(
++    const at::Tensor& lhs,
++    const at::Tensor& rhs,
++    const at::Scalar& alpha = 1) {
++  TORCH_INTERNAL_ASSERT(is_mixed_float_integer(lhs, rhs));
++  const auto promoted_lhs =
++      lhs.scalar_type() == at::kFloat ? lhs : lhs.to(at::kFloat);
++  const auto promoted_rhs =
++      rhs.scalar_type() == at::kFloat ? rhs : rhs.to(at::kFloat);
++  return binary_tensor<Op>(promoted_lhs, promoted_rhs, alpha);
++}
++
 +at::Tensor add_tensor(
 +    const at::Tensor& lhs,
 +    const at::Tensor& rhs,
 +    const at::Scalar& alpha) {
++  if (lhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(rhs)) {
++      return at::add(lhs, *scalar, alpha);
++    }
++  }
++  if (rhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(lhs)) {
++      return at::add(at::mul(rhs, alpha), *scalar);
++    }
++  }
++  if (is_mixed_float_integer(lhs, rhs)) {
++    return mixed_float_integer_tensor<BinaryOp::Add>(lhs, rhs, alpha);
++  }
++  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong) {
++    return pyodide_pytorch::webgpu::llm::add_long_tensor(lhs, rhs, alpha);
++  }
 +  return binary_tensor<BinaryOp::Add>(lhs, rhs, alpha);
 +}
 +
@@ -247,12 +300,41 @@ index 0000000..3ee45d7
 +    const at::Tensor& rhs,
 +    const at::Scalar& alpha,
 +    at::Tensor& output) {
++  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong &&
++      output.scalar_type() == at::kLong) {
++    auto result =
++        pyodide_pytorch::webgpu::llm::add_long_tensor(lhs, rhs, alpha);
++    pyodide_pytorch::webgpu::llm::copy_strided(result, output);
++    return output;
++  }
++  if (output.scalar_type() == at::kFloat &&
++      is_mixed_float_integer(lhs, rhs)) {
++    auto result = add_tensor(lhs, rhs, alpha);
++    pyodide_pytorch::webgpu::llm::copy_strided(result, output);
++    return output;
++  }
 +  return binary_out<BinaryOp::Add>(lhs, rhs, alpha, output);
 +}
 +
 +at::Tensor mul_tensor(const at::Tensor& lhs, const at::Tensor& rhs) {
++  if (lhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(rhs)) {
++      return at::mul(lhs, *scalar);
++    }
++  }
++  if (rhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(lhs)) {
++      return at::mul(rhs, *scalar);
++    }
++  }
 +  if (lhs.scalar_type() == at::kBool || rhs.scalar_type() == at::kBool) {
 +    return pyodide_pytorch::webgpu::llm::mul_bool_tensor(lhs, rhs);
++  }
++  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong) {
++    return pyodide_pytorch::webgpu::llm::mul_long_tensor(lhs, rhs);
++  }
++  if (is_mixed_float_integer(lhs, rhs)) {
++    return pyodide_pytorch::webgpu::llm::mul_float_integer_tensor(lhs, rhs);
 +  }
 +  return binary_tensor<BinaryOp::Mul>(lhs, rhs);
 +}
@@ -261,6 +343,13 @@ index 0000000..3ee45d7
 +    const at::Tensor& lhs,
 +    const at::Tensor& rhs,
 +    at::Tensor& output) {
++  if ((lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong) ||
++      (output.scalar_type() == at::kFloat &&
++       is_mixed_float_integer(lhs, rhs))) {
++    auto result = mul_tensor(lhs, rhs);
++    pyodide_pytorch::webgpu::llm::copy_strided(result, output);
++    return output;
++  }
 +  return binary_out<BinaryOp::Mul>(lhs, rhs, 1, output);
 +}
 +
@@ -268,6 +357,22 @@ index 0000000..3ee45d7
 +    const at::Tensor& lhs,
 +    const at::Tensor& rhs,
 +    const at::Scalar& alpha) {
++  if (lhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(rhs)) {
++      return at::sub(lhs, *scalar, alpha);
++    }
++  }
++  if (rhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(lhs)) {
++      return at::rsub(rhs, *scalar, alpha);
++    }
++  }
++  if (is_mixed_float_integer(lhs, rhs)) {
++    return mixed_float_integer_tensor<BinaryOp::Sub>(lhs, rhs, alpha);
++  }
++  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong) {
++    return pyodide_pytorch::webgpu::llm::sub_long_tensor(lhs, rhs, alpha);
++  }
 +  return binary_tensor<BinaryOp::Sub>(lhs, rhs, alpha);
 +}
 +
@@ -276,10 +381,33 @@ index 0000000..3ee45d7
 +    const at::Tensor& rhs,
 +    const at::Scalar& alpha,
 +    at::Tensor& output) {
++  if (lhs.scalar_type() == at::kLong && rhs.scalar_type() == at::kLong &&
++      output.scalar_type() == at::kLong) {
++    auto result =
++        pyodide_pytorch::webgpu::llm::sub_long_tensor(lhs, rhs, alpha);
++    pyodide_pytorch::webgpu::llm::copy_strided(result, output);
++    return output;
++  }
++  if (output.scalar_type() == at::kFloat &&
++      is_mixed_float_integer(lhs, rhs)) {
++    auto result = sub_tensor(lhs, rhs, alpha);
++    pyodide_pytorch::webgpu::llm::copy_strided(result, output);
++    return output;
++  }
 +  return binary_out<BinaryOp::Sub>(lhs, rhs, alpha, output);
 +}
 +
 +at::Tensor div_tensor(const at::Tensor& lhs, const at::Tensor& rhs) {
++  if (lhs.device().is_privateuseone()) {
++    if (const auto scalar = cpu_scalar_value(rhs)) {
++      return at::div(lhs, *scalar);
++    }
++  }
++  if (rhs.device().is_privateuseone() && rhs.scalar_type() == at::kFloat) {
++    if (const auto scalar = cpu_scalar_value(lhs)) {
++      return at::mul(at::reciprocal(rhs), *scalar);
++    }
++  }
 +  return binary_tensor<BinaryOp::Div>(lhs, rhs);
 +}
 +
@@ -1667,7 +1795,7 @@ index 0000000..5488ea5
 +    }
 +    TORCH_CHECK(
 +        core::getWebGPUContext().is_initialized(),
-+        "WebGPU is not initialized; call `await torch.webgpu.init()` first");
++        "WebGPU is not initialized; call `torch.webgpu.init()` first");
 +    TORCH_CHECK(
 +        nbytes <= UINT32_MAX - std::size_t(3),
 +        "WebGPU allocation is too large: ",
@@ -2020,7 +2148,7 @@ index 0000000..5488ea5
 +void batch_begin() {
 +  TORCH_CHECK(
 +      core::getWebGPUContext().is_initialized(),
-+      "WebGPU is not initialized; call `await torch.webgpu.init()` first");
++      "WebGPU is not initialized; call `torch.webgpu.init()` first");
 +  torch_webgpu_batch_begin();
 +}
 +
@@ -2033,7 +2161,7 @@ index 0000000..5488ea5
 +void flush() {
 +  TORCH_CHECK(
 +      core::getWebGPUContext().is_initialized(),
-+      "WebGPU is not initialized; call `await torch.webgpu.init()` first");
++      "WebGPU is not initialized; call `torch.webgpu.init()` first");
 +  torch_webgpu_flush();
 +}
 +
@@ -2142,7 +2270,7 @@ new file mode 100644
 index 0000000..4845eb3
 --- /dev/null
 +++ b/torch/webgpu/__init__.py
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,485 @@
 +"""Experimental browser WebGPU backend for the Pyodide PyTorch build.
 +
 +GPU storage and ATen dispatch are implemented in C++ using PyTorch's
@@ -2197,13 +2325,18 @@ index 0000000..4845eb3
 +    state = getattr(_js().globalThis, "__torchWebGPU", None)
 +    if state is None:
 +        raise RuntimeError(
-+            "WebGPU is not initialized; call `await torch.webgpu.init()` first"
++            "WebGPU is not initialized; call `torch.webgpu.init()` first"
 +        )
 +    return state
 +
 +
-+async def init(*, device: Any | None = None) -> None:
-+    """Initialize the browser GPUDevice used by the compiled backend."""
++async def init_async(*, device: Any | None = None) -> None:
++    """Asynchronously initialize the browser GPUDevice.
++
++    This is the portable fallback for runtimes or entrypoints without JSPI.
++    Code entered through ``runPythonAsync()`` or ``callPromising()`` should
++    normally use :func:`init`, which keeps the Python call graph synchronous.
++    """
 +
 +    global _adapter, _device
 +
@@ -2283,6 +2416,44 @@ index 0000000..4845eb3
 +    _device = device
 +
 +
++def _run_sync(
++    awaitable_factory: Any,
++    *,
++    operation: str,
++    async_fallback: str,
++):
++    """Run one browser awaitable through Pyodide's active JSPI stack."""
++
++    try:
++        from pyodide.ffi import can_run_sync, run_sync
++    except ImportError as exc:  # pragma: no cover - browser-only module
++        raise RuntimeError(f"{operation} requires Pyodide JSPI") from exc
++    if not can_run_sync():
++        raise RuntimeError(
++            f"{operation} requires Pyodide JSPI and a Python entrypoint "
++            "using runPythonAsync() or callPromising(); use "
++            f"`{async_fallback}` instead"
++        )
++    return run_sync(awaitable_factory())
++
++
++def init(*, device: Any | None = None) -> None:
++    """Initialize WebGPU without an exposed Python ``await`` boundary.
++
++    JavaScript must enter Python through ``runPythonAsync()`` or invoke a
++    Python function through ``callPromising()`` so Pyodide can stack-switch.
++    Use :func:`init_async` when JSPI is unavailable.
++    """
++
++    if is_initialized():
++        return
++    _run_sync(
++        lambda: init_async(device=device),
++        operation="synchronous WebGPU initialization",
++        async_fallback="await torch.webgpu.init_async(...)",
++    )
++
++
 +@contextmanager
 +def batch() -> Iterator[None]:
 +    """Batch eager WebGPU command buffers into one explicit submission scope.
@@ -2306,11 +2477,21 @@ index 0000000..4845eb3
 +    torch.ops.webgpu._flush()
 +
 +
-+async def synchronize() -> None:
-+    """Wait for all commands submitted before this call."""
++async def synchronize_async() -> None:
++    """Asynchronously wait for commands submitted before this call."""
 +
 +    _flush()
 +    await _state().queue.onSubmittedWorkDone()
++
++
++def synchronize() -> None:
++    """Wait for queued WebGPU work through an active JSPI stack."""
++
++    _run_sync(
++        synchronize_async,
++        operation="synchronous WebGPU synchronization",
++        async_fallback="await torch.webgpu.synchronize_async()",
++    )
 +
 +
 +async def to_cpu_async(tensor: torch.Tensor) -> torch.Tensor:
@@ -2399,19 +2580,11 @@ index 0000000..4845eb3
 +
 +    if tensor.device.type != "webgpu":
 +        raise TypeError(f"expected a WebGPU tensor, got {tensor.device}")
-+    try:
-+        from pyodide.ffi import can_run_sync, run_sync
-+    except ImportError as exc:  # pragma: no cover - browser-only module
-+        raise RuntimeError(
-+            "synchronous WebGPU readback requires Pyodide JSPI"
-+        ) from exc
-+    if not can_run_sync():
-+        raise RuntimeError(
-+            "synchronous WebGPU readback requires Pyodide JSPI and a Python "
-+            "entrypoint using runPythonAsync() or callPromising(); use "
-+            "`await torch.webgpu.to_cpu_async(tensor)` instead"
-+        )
-+    return run_sync(to_cpu_async(tensor))
++    return _run_sync(
++        lambda: to_cpu_async(tensor),
++        operation="synchronous WebGPU readback",
++        async_fallback="await torch.webgpu.to_cpu_async(tensor)",
++    )
 +
 +
 +def _tensor_cpu(
@@ -2571,6 +2744,7 @@ index 0000000..4845eb3
 +    "device_count",
 +    "get_amp_supported_dtype",
 +    "init",
++    "init_async",
 +    "is_available",
 +    "is_initialized",
 +    "kernel_submissions",
@@ -2578,6 +2752,7 @@ index 0000000..4845eb3
 +    "readback_submissions",
 +    "shader_compilations",
 +    "synchronize",
++    "synchronize_async",
 +    "to_cpu_async",
 +    "to_cpu_sync",
 +]

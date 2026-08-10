@@ -184,9 +184,10 @@ class StridedReadbackContractTests(unittest.TestCase):
             self.transformers_gate,
         )
         self.assertIn(
-            "await torch.webgpu.to_cpu_async(cache_keys_gpu)",
+            "cache_keys_gpu.cpu()",
             self.transformers_gate,
         )
+        self.assertNotIn("cache_keys_gpu.contiguous().cpu()", self.transformers_gate)
 
     def test_raw_shader_gate_covers_offset_prefix_and_output_bounds(self) -> None:
         self.assertIn('"strided_copy.wgsl"', self.raw_gate)

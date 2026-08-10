@@ -80,7 +80,7 @@ import math
 import time
 
 assert torch.webgpu.is_available()
-await torch.webgpu.init(device=js.webgpuTestDevice)
+torch.webgpu.init(device=js.webgpuTestDevice)
 
 x = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32).to("webgpu")
 y = torch.tensor([4.0, 5.0, 6.0], dtype=torch.float32).to("webgpu")
@@ -1301,11 +1301,11 @@ def gpu_decoder_forward():
 
 with torch.no_grad():
     gpu_decoder_forward()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
     gpu_start = time.perf_counter()
     for _ in range(PERFORMANCE_REPEATS):
         gpu_decoder_forward()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
     gpu_milliseconds = (time.perf_counter() - gpu_start) * 1000 / PERFORMANCE_REPEATS
 
     cpu_start = time.perf_counter()

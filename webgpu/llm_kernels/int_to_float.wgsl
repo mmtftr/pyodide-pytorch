@@ -94,7 +94,29 @@ fn main(
     let source_word = source_index * params.source_word_width;
     let destination_word = destination_index * params.destination_word_width;
     if (params.convert_to_float != 0u) {
+        if (params.convert_to_float == 2u) {
+            let value = bitcast<f32>(source[source_word]);
+            // Branch before conversion: converting NaN, infinity, or a value
+            // outside i32 is not defined by the restricted-Long contract.
+            if (!(value >= -2147483648.0 && value < 2147483648.0)) {
+                destination[destination_word] = 0u;
+                destination[destination_word + 1u] = 0x7fffffffu;
+                return;
+            }
+            let converted = i32(trunc(value));
+            destination[destination_word] = bitcast<u32>(converted);
+            destination[destination_word + 1u] =
+                select(0u, 0xffffffffu, converted < 0);
+            return;
+        }
         let value = source[source_word];
+        if (params.source_word_width == 2u) {
+            let expected_high = select(0, -1, value < 0);
+            if (source[source_word + 1u] != expected_high) {
+                destination[destination_word] = 0x7fc00000u;
+                return;
+            }
+        }
         destination[destination_word] = bitcast<u32>(f32(value));
     } else {
         // `_to_copy` is a real copy even without a dtype change. Copy as raw

@@ -48,7 +48,7 @@ The implemented compromise is a compute-only Emdawn profile:
 
 ## Initialization and handles
 
-`await torch.webgpu.init()` requests a browser `GPUAdapter`/`GPUDevice`, or
+`torch.webgpu.init_async()` requests a browser `GPUAdapter`/`GPUDevice`, or
 accepts a device supplied by a test harness. It creates one JavaScript state
 object on `globalThis.__torchWebGPU` and reserves handle `1` for the device and
 handle `2` for its queue. Only then does it call the native
@@ -77,7 +77,7 @@ textures, or native `WaitAny`.
 
 CPU-to-GPU upload calls `GPUQueue.writeBuffer` synchronously with the current
 Emscripten `HEAPU8`. Pyodide allows Wasm memory growth, so no heap view or Wasm
-pointer is cached across an `await`. GPU-to-CPU always has the explicit Python
+pointer is cached across an `await`. GPU-to-CPU has the explicit Python
 coroutine `torch.webgpu.to_cpu_async`: it copies into a MAP_READ buffer, awaits
 `mapAsync`, copies the mapped bytes, and then unmaps and destroys the temporary
 buffer. The CPU tensor is built with `torch.frombuffer(...).clone()` rather
@@ -85,8 +85,10 @@ than `torch.from_numpy()`. This avoids the Pyodide/PyTorch bridge regression
 that raised `element_size must be 0`, and the clone gives PyTorch-owned storage
 after the temporary NumPy array is collected.
 
+Synchronous `torch.webgpu.init()`, `torch.webgpu.synchronize()`,
 `torch.webgpu.to_cpu_sync`, WebGPU `Tensor.cpu()`, and WebGPU `Tensor.item()`
-use Pyodide's JSPI `run_sync` bridge around that same coroutine. They work only
+use Pyodide's JSPI `run_sync` bridge around the corresponding coroutine. They
+work only
 when `pyodide.ffi.can_run_sync()` is true and Python was entered through
 `runPythonAsync()` or a PyProxy `callPromising()` call. `runPython()` and a
 direct synchronous PyProxy call receive a directed error naming both valid
@@ -95,8 +97,9 @@ PyTorch's original `cpu()` and `item()` methods.
 
 JSPI must be feature-detected rather than inferred from a user agent. Chrome
 137 and later ship JSPI without a browser flag; Node 24 still needs
-`--experimental-wasm-jspi`. Runtimes without stack switching must continue to
-use `await torch.webgpu.to_cpu_async(tensor)`. See Pyodide's
+`--experimental-wasm-jspi`. Runtimes without stack switching must use
+`await torch.webgpu.init_async()`, `await torch.webgpu.synchronize_async()`, or
+`await torch.webgpu.to_cpu_async(tensor)`. See Pyodide's
 [JSPI overview](https://blog.pyodide.org/posts/jspi/) and
 [`run_sync` API](https://pyodide.org/en/stable/usage/api/python-api/ffi.html#pyodide.ffi.run_sync).
 

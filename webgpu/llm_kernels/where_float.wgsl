@@ -16,7 +16,7 @@ struct Params {
     rhs_scalar_bits: u32,
     output_offset: u32,
     dispatch_x: u32,
-    _pad0: u32,
+    output_kind: u32,
     _pad1: u32,
     output_sizes: array<u32, MAX_DIMS>,
     condition_sizes: array<u32, MAX_DIMS>,
@@ -28,9 +28,9 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read> condition: array<u32>;
-@group(0) @binding(1) var<storage, read> lhs: array<f32>;
-@group(0) @binding(2) var<storage, read> rhs: array<f32>;
-@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(1) var<storage, read> lhs: array<u32>;
+@group(0) @binding(2) var<storage, read> rhs: array<u32>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
 fn condition_index(linear_index: u32) -> u32 {
@@ -94,17 +94,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let linear_index = gid.x + gid.y * params.dispatch_x * WORKGROUP_SIZE;
     if (linear_index >= params.length) { return; }
 
-    var left = bitcast<f32>(params.lhs_scalar_bits);
-    if (params.lhs_is_scalar == 0u) {
-        left = lhs[lhs_index(linear_index)];
+    let choose_left = condition_at(condition_index(linear_index));
+    if (params.output_kind == 0u) {
+        var left = params.lhs_scalar_bits;
+        if (params.lhs_is_scalar == 0u) {
+            left = lhs[lhs_index(linear_index)];
+        }
+        var right = params.rhs_scalar_bits;
+        if (params.rhs_is_scalar == 0u) {
+            right = rhs[rhs_index(linear_index)];
+        }
+        output[params.output_offset + linear_index] =
+            select(right, left, choose_left);
+        return;
     }
-    var right = bitcast<f32>(params.rhs_scalar_bits);
-    if (params.rhs_is_scalar == 0u) {
-        right = rhs[rhs_index(linear_index)];
-    }
-    output[params.output_offset + linear_index] = select(
-        right,
-        left,
-        condition_at(condition_index(linear_index)),
-    );
+
+    let left_word = lhs_index(linear_index) * 2u;
+    let right_word = rhs_index(linear_index) * 2u;
+    let output_word = (params.output_offset + linear_index) * 2u;
+    output[output_word] = select(rhs[right_word], lhs[left_word], choose_left);
+    output[output_word + 1u] = select(
+        rhs[right_word + 1u], lhs[left_word + 1u], choose_left);
 }

@@ -215,7 +215,7 @@ import torch.webgpu
 
 
 assert torch.webgpu.is_available()
-await torch.webgpu.init(device=js.webgpuTestDevice)
+torch.webgpu.init(device=js.webgpuTestDevice)
 
 adapter = dict(js.webgpuTest.adapter.to_py())
 software_adapter = adapter["mode"] == "swiftshader"
@@ -293,11 +293,11 @@ async def timed_case(name, category, shape, repeats, operation, expected):
     # gets a longer warmup so GPU clock ramp does not dominate the first cases.
     for _ in range(1 if software_adapter else 12):
         operation()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
 
     single_before = torch.webgpu.diagnostics()
     output = operation()
-    await torch.webgpu.synchronize()
+    torch.webgpu.synchronize()
     single_after = torch.webgpu.diagnostics()
     single_diagnostics = diagnostic_delta(single_before, single_after)
     assert single_diagnostics["dispatches"] >= 1, (name, single_diagnostics)
@@ -322,7 +322,7 @@ async def timed_case(name, category, shape, repeats, operation, expected):
         else:
             for _ in range(repeats):
                 output = operation()
-        await torch.webgpu.synchronize()
+        torch.webgpu.synchronize()
         elapsed = (time.perf_counter() - started) * 1000 / repeats
         timestamp_end = int(js.webgpuTimestampCount())
         after = torch.webgpu.diagnostics()
