@@ -69,6 +69,8 @@ The restricted-Long tranche preserves ordinary eight-byte `torch.int64`
 storage while accepting values in the signed-int32 profile. It includes
 tensor/scalar add, subtract, multiply, reverse subtract, `abs`, `minimum`,
 `lt`/`gt`, Long `where`, `cumsum`, and checked truncating float conversion.
+Zero-dimensional CPU scalar tensors created by ATen operator promotion are
+unboxed into shader uniforms; the WebGPU tensor is never transferred to CPU.
 Noncanonical inputs are contained rather than silently reinterpreted. These
 operators cover BLOOM ALiBi and T5 relative-position buckets.
 

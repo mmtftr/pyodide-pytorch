@@ -96,6 +96,16 @@ class WebGPUArchitectureCoverageContractTests(unittest.TestCase):
         self.assertIn("browser_unary.cpp", self.patch)
         self.assertNotIn("torch-webgpu/csrc/ops/trig.cpp", self.patch)
 
+    def test_cpu_scalar_tensor_promotion_stays_on_webgpu(self) -> None:
+        self.assertIn("cpu_scalar_value", self.patch)
+        for expression in (
+            "return at::add(lhs, *scalar, alpha);",
+            "return at::mul(lhs, *scalar);",
+            "return at::sub(lhs, *scalar, alpha);",
+            "return at::div(lhs, *scalar);",
+        ):
+            self.assertIn(expression, self.patch)
+
     def test_staging_and_raw_numerical_gate_cover_new_shaders(self) -> None:
         self.assertEqual(
             stage_webgpu_sources.SHADERS["long_arithmetic.wgsl"],
